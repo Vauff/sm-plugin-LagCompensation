@@ -1,0 +1,50 @@
+"Games"
+{
+    "cstrike"
+    {
+        "Signatures"
+        {
+            "CBaseEntity::PhysicsTouchTriggers"
+            {
+                "library"       "server"
+                "linux"         "@_ZN11CBaseEntity20PhysicsTouchTriggersEPK6Vector"
+            }
+
+            "SetLocalOrigin"
+            {
+                "library"       "server"
+                "linux"         "@_ZN11CBaseEntity14SetLocalOriginERK6Vector"
+            }
+
+            "SetLocalAngles"
+            {
+                "library"       "server"
+                "linux"         "@_ZN11CBaseEntity14SetLocalAnglesERK6QAngle"
+            }
+
+            "SetCollisionBounds"
+            {
+                "library"       "server"
+                "linux"         "@_ZN11CBaseEntity18SetCollisionBoundsERK6VectorS2_"
+            }
+        }
+
+        "Functions"
+        {
+            "CBaseEntity__PhysicsTouchTriggers"
+            {
+                "signature"     "CBaseEntity::PhysicsTouchTriggers"
+                "callconv"      "thiscall"
+                "return"        "void"
+                "this"          "entity"
+                "arguments"
+                {
+                    "pPrevAbsOrigin"
+                    {
+                        "type"    "vectorptr"
+                    }
+                }
+            }
+        }
+    }
+}
