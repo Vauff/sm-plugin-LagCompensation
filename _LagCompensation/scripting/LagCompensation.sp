@@ -17,6 +17,7 @@ public Plugin myinfo =
 };
 
 bool g_bLateLoad = false;
+bool g_bBlockPhysics = false;
 bool g_bNoPhysics[2048];
 
 #define MAX_RECORDS 64
@@ -24,11 +25,8 @@ bool g_bNoPhysics[2048];
 
 enum struct LagRecord
 {
-	int fFlags;
 	float vecOrigin[3];
 	float vecAngles[3];
-	float vecMins[3];
-	float vecMaxs[3];
 	float flSimulationTime;
 }
 
@@ -99,6 +97,9 @@ public void OnPluginStart()
 
 public MRESReturn Detour_OnPhysicsTouchTriggers(int entity, Handle hReturn, Handle hParams)
 {
+	if(!g_bBlockPhysics)
+		return MRES_Ignored;
+
 	if(entity < 0 || entity > sizeof(g_bNoPhysics))
 		return MRES_Ignored;
 
@@ -165,6 +166,10 @@ public void OnRunThinkFunctions(bool simulating)
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
 {
+	g_bBlockPhysics = true;
+	if(!IsPlayerAlive(client))
+		return Plugin_Continue;
+
 	int delta = GetGameTickCount() - tickcount;
 	if(delta < 0)
 		delta = 0;
@@ -189,7 +194,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		if(iRecordIndex < 0)
 			iRecordIndex += MAX_RECORDS;
 
-		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, g_aaLagRecords[i][iRecordIndex]);
+		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, client, g_aaLagRecords[i][iRecordIndex]);
 		g_aEntityLagData[i].bRestore = true;
 
 #if defined DEBUG
@@ -220,7 +225,7 @@ public void OnRunThinkFunctions2()
 			continue;
 		}
 
-		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, g_aEntityLagData[i].RestoreData);
+		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, 0, g_aEntityLagData[i].RestoreData);
 		g_aEntityLagData[i].bRestore = false;
 
 #if defined DEBUG
@@ -232,6 +237,7 @@ public void OnRunThinkFunctions2()
 		);
 #endif
 	}
+	g_bBlockPhysics = false;
 }
 
 public void OnRunThinkFunctionsPost(bool simulating)
@@ -274,17 +280,15 @@ void RecordDataIntoRecord(int iEntity, LagRecord Record)
 {
 	GetEntPropVector(iEntity, Prop_Data, "m_vecAbsOrigin", Record.vecOrigin);
 	GetEntPropVector(iEntity, Prop_Data, "m_angAbsRotation", Record.vecAngles);
-	GetEntPropVector(iEntity, Prop_Data, "m_vecMins", Record.vecMins);
-	GetEntPropVector(iEntity, Prop_Data, "m_vecMaxs", Record.vecMaxs);
 	Record.flSimulationTime = GetEntPropFloat(iEntity, Prop_Data, "m_flSimulationTime");
 }
 
-void RestoreEntityFromRecord(int iEntity, LagRecord Record)
+void RestoreEntityFromRecord(int iEntity, int iFilter, LagRecord Record)
 {
-	SDKCall(g_hSetLocalOrigin, iEntity, Record.vecOrigin);
-	SDKCall(g_hSetLocalAngles, iEntity, Record.vecAngles);
-	SDKCall(g_hSetCollisionBounds, iEntity, Record.vecMins, Record.vecMaxs);
+	FilterTriggerMoved(iFilter);
 	SetEntPropFloat(iEntity, Prop_Data, "m_flSimulationTime", Record.flSimulationTime);
+	TeleportEntity(iEntity, Record.vecOrigin, Record.vecAngles, NULL_VECTOR);
+	FilterTriggerMoved(-1);
 }
 
 bool AddEntityForLagCompensation(int iEntity)
