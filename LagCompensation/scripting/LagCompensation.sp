@@ -20,14 +20,13 @@ bool g_bLateLoad = false;
 bool g_bBlockPhysics = false;
 bool g_bNoPhysics[2048];
 
-#define MAX_RECORDS 64
+#define MAX_RECORDS 32
 #define MAX_ENTITIES 16
 
 enum struct LagRecord
 {
 	float vecOrigin[3];
 	float vecAngles[3];
-	float flSimulationTime;
 }
 
 enum struct EntityLagData
@@ -36,6 +35,7 @@ enum struct EntityLagData
 	int iRecordIndex;
 	int iNumRecords;
 	bool bRestore;
+	bool bMoving;
 	LagRecord RestoreData;
 }
 
@@ -44,9 +44,8 @@ EntityLagData g_aEntityLagData[MAX_ENTITIES];
 int g_iNumEntities = 0;
 
 Handle g_hPhysicsTouchTriggers;
-Handle g_hSetLocalOrigin;
-Handle g_hSetLocalAngles;
-Handle g_hSetCollisionBounds;
+Handle g_hSetAbsOrigin;
+Handle g_hSetAbsAngles;
 
 public void OnPluginStart()
 {
@@ -54,36 +53,25 @@ public void OnPluginStart()
 	if(!hGameData)
 		SetFailState("Failed to load LagCompensation gamedata.");
 
-	// CBaseEntity::SetLocalOrigin
+	// CBaseEntity::SetAbsOrigin
 	StartPrepSDKCall(SDKCall_Entity);
-	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "SetLocalOrigin"))
+	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "SetAbsOrigin"))
 	{
 		delete hGameData;
-		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"SetLocalOrigin\") failed!");
+		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"SetAbsOrigin\") failed!");
 	}
 	PrepSDKCall_AddParameter(SDKType_Vector, SDKPass_ByRef);
-	g_hSetLocalOrigin = EndPrepSDKCall();
+	g_hSetAbsOrigin = EndPrepSDKCall();
 
-	// CBaseEntity::SetLocalAngles
+	// CBaseEntity::SetAbsAngles
 	StartPrepSDKCall(SDKCall_Entity);
-	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "SetLocalAngles"))
+	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "SetAbsAngles"))
 	{
 		delete hGameData;
-		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"SetLocalAngles\") failed!");
+		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"SetAbsAngles\") failed!");
 	}
 	PrepSDKCall_AddParameter(SDKType_QAngle, SDKPass_ByRef);
-	g_hSetLocalAngles = EndPrepSDKCall();
-
-	// CBaseEntity::SetCollisionBounds
-	StartPrepSDKCall(SDKCall_Entity);
-	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "SetCollisionBounds"))
-	{
-		delete hGameData;
-		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"SetCollisionBounds\") failed!");
-	}
-	PrepSDKCall_AddParameter(SDKType_Vector, SDKPass_ByRef);
-	PrepSDKCall_AddParameter(SDKType_Vector, SDKPass_ByRef);
-	g_hSetCollisionBounds = EndPrepSDKCall();
+	g_hSetAbsAngles = EndPrepSDKCall();
 
 
 	g_hPhysicsTouchTriggers = DHookCreateFromConf(hGameData, "CBaseEntity__PhysicsTouchTriggers");
@@ -149,7 +137,7 @@ public void OnRunThinkFunctions(bool simulating)
 {
 	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++, j--)
 	{
-		if(g_aEntityLagData[i].iEntity == 0)
+		if(g_aEntityLagData[i].iEntity == 0 || !g_aEntityLagData[i].bMoving)
 			continue;
 
 		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
@@ -162,7 +150,7 @@ public void OnRunThinkFunctions(bool simulating)
 
 		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aEntityLagData[i].RestoreData);
 #if defined DEBUG
-		LogMessage("[%d] index %d, RECORD entity %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
+		LogMessage("1 [%d] [%d] index %d, RECORD entity %d", GetGameTickCount(), i, simulating, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
 		LogMessage("%f %f %f",
 			g_aEntityLagData[i].RestoreData.vecOrigin[0],
 			g_aEntityLagData[i].RestoreData.vecOrigin[1],
@@ -183,7 +171,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 
 	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++, j--)
 	{
-		if(g_aEntityLagData[i].iEntity == 0 || g_aEntityLagData[i].iNumRecords == 0)
+		if(g_aEntityLagData[i].iEntity == 0 || !g_aEntityLagData[i].bMoving)
 			continue;
 
 		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
@@ -205,7 +193,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		g_aEntityLagData[i].bRestore = true;
 
 #if defined DEBUG
-		LogMessage("[%d] index %d, Entity %d -> delta = %d | Record = %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, delta, iRecordIndex);
+		LogMessage("2 [%d] index %d, Entity %d -> delta = %d | Record = %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, delta, iRecordIndex);
 		LogMessage("%f %f %f",
 			g_aaLagRecords[i][iRecordIndex].vecOrigin[0],
 			g_aaLagRecords[i][iRecordIndex].vecOrigin[1],
@@ -217,7 +205,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	return Plugin_Continue;
 }
 
-public void OnPostPlayerThinkFunctionsPost()
+public void OnPostPlayerThinkFunctions()
 {
 	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++, j--)
 	{
@@ -236,7 +224,7 @@ public void OnPostPlayerThinkFunctionsPost()
 		g_aEntityLagData[i].bRestore = false;
 
 #if defined DEBUG
-		LogMessage("[%d] index %d, RESTORE entity %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
+		LogMessage("3 [%d] index %d, RESTORE entity %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
 		LogMessage("%f %f %f",
 			g_aEntityLagData[i].RestoreData.vecOrigin[0],
 			g_aEntityLagData[i].RestoreData.vecOrigin[1],
@@ -263,6 +251,25 @@ public void OnRunThinkFunctionsPost(bool simulating)
 			continue;
 		}
 
+		if(g_aEntityLagData[i].iNumRecords)
+		{
+			if(!g_aEntityLagData[i].bMoving)
+			{
+				float vecOldOrigin[3];
+				vecOldOrigin[0] = g_aaLagRecords[i][0].vecOrigin[0];
+				vecOldOrigin[1] = g_aaLagRecords[i][0].vecOrigin[1];
+				vecOldOrigin[2] = g_aaLagRecords[i][0].vecOrigin[2];
+
+				float vecOrigin[3];
+				GetEntPropVector(g_aEntityLagData[i].iEntity, Prop_Data, "m_vecAbsOrigin", vecOrigin);
+
+				if(vecOldOrigin[0] == vecOrigin[0] && vecOldOrigin[1] == vecOrigin[1] && vecOldOrigin[2] == vecOrigin[2])
+					continue;
+			}
+
+			g_aEntityLagData[i].bMoving = true;
+		}
+
 		g_aEntityLagData[i].iRecordIndex++;
 
 		if(g_aEntityLagData[i].iRecordIndex >= MAX_RECORDS)
@@ -274,7 +281,7 @@ public void OnRunThinkFunctionsPost(bool simulating)
 		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex]);
 
 #if defined DEBUG
-		LogMessage("[%d] index %d, RECORD entity %d into %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
+		LogMessage("4 [%d] index %d, RECORD entity %d into %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
 		LogMessage("%f %f %f",
 			g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex].vecOrigin[0],
 			g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex].vecOrigin[1],
@@ -290,16 +297,14 @@ void RecordDataIntoRecord(int iEntity, LagRecord Record)
 {
 	GetEntPropVector(iEntity, Prop_Data, "m_vecAbsOrigin", Record.vecOrigin);
 	GetEntPropVector(iEntity, Prop_Data, "m_angAbsRotation", Record.vecAngles);
-	Record.flSimulationTime = GetEntPropFloat(iEntity, Prop_Data, "m_flSimulationTime");
 }
 
 void RestoreEntityFromRecord(int iEntity, int iFilter, LagRecord Record)
 {
 	FilterTriggerMoved(iFilter);
 
-	SetEntPropFloat(iEntity, Prop_Data, "m_flSimulationTime", Record.flSimulationTime);
-	SDKCall(g_hSetLocalAngles, iEntity, Record.vecAngles);
-	SDKCall(g_hSetLocalOrigin, iEntity, Record.vecOrigin);
+	SDKCall(g_hSetAbsAngles, iEntity, Record.vecAngles);
+	SDKCall(g_hSetAbsOrigin, iEntity, Record.vecOrigin);
 
 	FilterTriggerMoved(-1);
 }
@@ -322,6 +327,7 @@ bool AddEntityForLagCompensation(int iEntity)
 		g_aEntityLagData[i].iEntity = iEntity;
 		g_aEntityLagData[i].iRecordIndex = -1;
 		g_aEntityLagData[i].iNumRecords = 0;
+		g_aEntityLagData[i].bMoving = false;
 
 		LogMessage("[%d] added %d under index %d", GetGameTickCount(), iEntity, i);
 
@@ -345,13 +351,25 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	if(!StrEqual(classname, "trigger_hurt"))
 		return;
 
-	int iParent = GetEntPropEnt(entity, Prop_Data, "m_pParent");
+	int iParent = entity;
+	char sParentClassname[64];
+	bool bGoodParents = false;
+	for(;;)
+	{
+		iParent = GetEntPropEnt(iParent, Prop_Data, "m_pParent");
+		if(iParent == -1)
+			break;
+
+		GetEntityClassname(iParent, sParentClassname, sizeof(sParentClassname));
+		if(StrEqual(sParentClassname, "func_movelinear") || StrEqual(sParentClassname, "func_door") || StrEqual(sParentClassname, "func_tracktrain"))
+		{
+			bGoodParents = true;
+			break;
+		}
+	}
+
 	if(iParent == -1)
 		return;
-
-	char sParentClassname[64];
-	GetEntityClassname(iParent, sParentClassname, sizeof(sParentClassname));
-
 
 	char sTargetname[64];
 	GetEntPropString(entity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
@@ -359,15 +377,19 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	char sParentTargetname[64];
 	GetEntPropString(iParent, Prop_Data, "m_iName", sParentTargetname, sizeof(sParentTargetname));
 
-	if(StrEqual(sParentTargetname, "Airship_Ending_Killwall"))
+	LogMessage("test: %s %s | parent: %s %s", classname, sTargetname, sParentClassname, sParentTargetname);
+
+	if(!bGoodParents)
+		return;
+
+	int SolidFlags = GetEntProp(iParent, Prop_Data, "m_usSolidFlags");
+	LogMessage("SolidFlags: %d", SolidFlags);
+
+	if(!(SolidFlags & 0x0004) && false) // FSOLID_NOT_SOLID
 		return;
 
 
-	bool result = false;
-	if(StrEqual(sParentClassname, "func_movelinear") || StrEqual(sParentClassname, "func_door") || StrEqual(sParentClassname, "func_tracktrain"))
-		result = AddEntityForLagCompensation(iParent);
-
-	if(!result)
+	if(!AddEntityForLagCompensation(entity))
 		return;
 
 	g_bNoPhysics[entity] = true;
