@@ -105,7 +105,7 @@ public MRESReturn Detour_OnPhysicsTouchTriggers(int entity, Handle hReturn, Hand
 
 	if(g_bNoPhysics[entity])
 	{
-		//LogMessage("blocked physics on %d", g_iNoPhysics);
+		//LogMessage("blocked physics on %d", entity);
 		return MRES_Supercede;
 	}
 	return MRES_Ignored;
@@ -161,12 +161,19 @@ public void OnRunThinkFunctions(bool simulating)
 		}
 
 		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aEntityLagData[i].RestoreData);
+#if defined DEBUG
+		LogMessage("[%d] index %d, RECORD entity %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
+		LogMessage("%f %f %f",
+			g_aEntityLagData[i].RestoreData.vecOrigin[0],
+			g_aEntityLagData[i].RestoreData.vecOrigin[1],
+			g_aEntityLagData[i].RestoreData.vecOrigin[2]
+		);
+#endif
 	}
 }
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
 {
-	g_bBlockPhysics = true;
 	if(!IsPlayerAlive(client))
 		return Plugin_Continue;
 
@@ -210,7 +217,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	return Plugin_Continue;
 }
 
-public void OnRunThinkFunctions2()
+public void OnPostPlayerThinkFunctionsPost()
 {
 	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++, j--)
 	{
@@ -229,7 +236,7 @@ public void OnRunThinkFunctions2()
 		g_aEntityLagData[i].bRestore = false;
 
 #if defined DEBUG
-		LogMessage("[%d] index %d, restore entity %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
+		LogMessage("[%d] index %d, RESTORE entity %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
 		LogMessage("%f %f %f",
 			g_aEntityLagData[i].RestoreData.vecOrigin[0],
 			g_aEntityLagData[i].RestoreData.vecOrigin[1],
@@ -237,7 +244,8 @@ public void OnRunThinkFunctions2()
 		);
 #endif
 	}
-	g_bBlockPhysics = false;
+
+	g_bBlockPhysics = true;
 }
 
 public void OnRunThinkFunctionsPost(bool simulating)
@@ -266,7 +274,7 @@ public void OnRunThinkFunctionsPost(bool simulating)
 		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex]);
 
 #if defined DEBUG
-		LogMessage("[%d] index %d, record entity %d into %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
+		LogMessage("[%d] index %d, RECORD entity %d into %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
 		LogMessage("%f %f %f",
 			g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex].vecOrigin[0],
 			g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex].vecOrigin[1],
@@ -274,6 +282,8 @@ public void OnRunThinkFunctionsPost(bool simulating)
 		);
 #endif
 	}
+
+	g_bBlockPhysics = false;
 }
 
 void RecordDataIntoRecord(int iEntity, LagRecord Record)
@@ -286,8 +296,11 @@ void RecordDataIntoRecord(int iEntity, LagRecord Record)
 void RestoreEntityFromRecord(int iEntity, int iFilter, LagRecord Record)
 {
 	FilterTriggerMoved(iFilter);
+
 	SetEntPropFloat(iEntity, Prop_Data, "m_flSimulationTime", Record.flSimulationTime);
-	TeleportEntity(iEntity, Record.vecOrigin, Record.vecAngles, NULL_VECTOR);
+	SDKCall(g_hSetLocalAngles, iEntity, Record.vecAngles);
+	SDKCall(g_hSetLocalOrigin, iEntity, Record.vecOrigin);
+
 	FilterTriggerMoved(-1);
 }
 
