@@ -35,8 +35,8 @@ enum struct EntityLagData
 	int iNumRecords;
 	int iRecordsValid;
 	int iDeleted;
+	int iNotMoving;
 	bool bRestore;
-	bool bMoving;
 	LagRecord RestoreData;
 }
 
@@ -145,17 +145,14 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 {
 	g_bRoundEnded = true;
 
-	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
+	for(int i = 0; i < g_iNumEntities; i++)
 	{
-		if(!g_aEntityLagData[i].iEntity)
-			continue;
-		j--;
-
 		g_aEntityLagData[i].iEntity = 0;
-		g_iNumEntities--;
 		LogMessage("[%d] round_end deleted: %d / %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
 		return;
 	}
+
+	g_iNumEntities = 0;
 }
 
 public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
@@ -188,12 +185,8 @@ public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
 	if(entity < 0 || entity > sizeof(g_bNoPhysics))
 		return MRES_Ignored;
 
-	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
+	for(int i = 0; i < g_iNumEntities; i++)
 	{
-		if(!g_aEntityLagData[i].iEntity)
-			continue;
-		j--;
-
 		if(g_aEntityLagData[i].iEntity != entity)
 			continue;
 
@@ -239,21 +232,16 @@ public void OnClientPutInServer(int client)
 
 public void OnRunThinkFunctions(bool simulating)
 {
-	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
+	for(int i = 0; i < g_iNumEntities; i++)
 	{
-		if(!g_aEntityLagData[i].iEntity)
-			continue;
-		j--;
-
-		if(!g_aEntityLagData[i].bMoving)
+		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
 			continue;
 
 		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
 		{
-			LogMessage("!!!!!!!!!!! OnRunThinkFunctions SHIT deleted: %d", g_aEntityLagData[i].iEntity);
-			g_aEntityLagData[i].iEntity = 0;
-			g_iNumEntities--;
-			continue;
+			LogMessage("!!!!!!!!!!! OnRunThinkFunctions SHIT deleted: %d / %d", i, g_aEntityLagData[i].iEntity);
+			RemoveRecord(i);
+			i--; continue;
 		}
 
 		if(g_aEntityLagData[i].iDeleted)
@@ -261,7 +249,11 @@ public void OnRunThinkFunctions(bool simulating)
 			if(g_aEntityLagData[i].iDeleted + MAX_RECORDS < GetGameTickCount())
 			{
 				LogMessage("[%d] !!!!!!!!!!! RemoveEdict: %d / ent: %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
+				// calls OnEntityDestroyed right away
+				// which calls RemoveRecord
+				// which moves the next element to our current position
 				RemoveEdict(g_aEntityLagData[i].iEntity);
+				i--; continue;
 			}
 			continue;
 		}
@@ -288,13 +280,9 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	if(delta < 0)
 		delta = 0;
 
-	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
+	for(int i = 0; i < g_iNumEntities; i++)
 	{
-		if(!g_aEntityLagData[i].iEntity)
-			continue;
-		j--;
-
-		if(!g_aEntityLagData[i].bMoving)
+		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
 			continue;
 
 		if(delta >= g_aEntityLagData[i].iNumRecords)
@@ -332,12 +320,8 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 
 public void OnPostPlayerThinkFunctions()
 {
-	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
+	for(int i = 0; i < g_iNumEntities; i++)
 	{
-		if(!g_aEntityLagData[i].iEntity)
-			continue;
-		j--;
-
 		if(!g_aEntityLagData[i].bRestore)
 			continue;
 
@@ -359,12 +343,8 @@ public void OnPostPlayerThinkFunctions()
 
 public void OnRunThinkFunctionsPost(bool simulating)
 {
-	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
+	for(int i = 0; i < g_iNumEntities; i++)
 	{
-		if(!g_aEntityLagData[i].iEntity)
-			continue;
-		j--;
-
 		if(g_aEntityLagData[i].iDeleted)
 		{
 			if(g_aEntityLagData[i].iRecordsValid)
@@ -380,23 +360,30 @@ public void OnRunThinkFunctionsPost(bool simulating)
 			continue;
 		}
 
+		LagRecord TmpRecord;
+		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, TmpRecord);
+
 		if(g_aEntityLagData[i].iNumRecords)
 		{
-			if(!g_aEntityLagData[i].bMoving)
+			int iOldRecord = g_aEntityLagData[i].iRecordIndex;
+
+			if(g_aaLagRecords[i][iOldRecord].vecOrigin[0] == TmpRecord.vecOrigin[0] &&
+				g_aaLagRecords[i][iOldRecord].vecOrigin[1] == TmpRecord.vecOrigin[1] &&
+				g_aaLagRecords[i][iOldRecord].vecOrigin[2] == TmpRecord.vecOrigin[2])
 			{
-				float vecOldOrigin[3];
-				vecOldOrigin[0] = g_aaLagRecords[i][0].vecOrigin[0];
-				vecOldOrigin[1] = g_aaLagRecords[i][0].vecOrigin[1];
-				vecOldOrigin[2] = g_aaLagRecords[i][0].vecOrigin[2];
-
-				float vecOrigin[3];
-				GetEntPropVector(g_aEntityLagData[i].iEntity, Prop_Data, "m_vecAbsOrigin", vecOrigin);
-
-				if(vecOldOrigin[0] == vecOrigin[0] && vecOldOrigin[1] == vecOrigin[1] && vecOldOrigin[2] == vecOrigin[2])
-					continue;
+				g_aEntityLagData[i].iNotMoving++;
+				if(g_aEntityLagData[i].iNotMoving == MAX_RECORDS)
+					LogMessage("[%d] index %d, entity %d GOING TO SLEEP", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
+			}
+			else
+			{
+				if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
+					LogMessage("[%d] index %d, entity %d WAKING UP", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
+				g_aEntityLagData[i].iNotMoving = 0;
 			}
 
-			g_aEntityLagData[i].bMoving = true;
+			if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
+				continue;
 		}
 
 		g_aEntityLagData[i].iRecordIndex++;
@@ -407,14 +394,14 @@ public void OnRunThinkFunctionsPost(bool simulating)
 		if(g_aEntityLagData[i].iNumRecords < MAX_RECORDS)
 			g_aEntityLagData[i].iRecordsValid = ++g_aEntityLagData[i].iNumRecords;
 
-		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex]);
+		LagRecord_Copy(g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex], TmpRecord);
 
 #if defined DEBUG
 		LogMessage("4 [%d] index %d, RECORD entity %d into %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
 		LogMessage("%f %f %f",
-			g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex].vecOrigin[0],
-			g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex].vecOrigin[1],
-			g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex].vecOrigin[2]
+			TmpRecord.vecOrigin[0],
+			TmpRecord.vecOrigin[1],
+			TmpRecord.vecOrigin[2]
 		);
 #endif
 	}
@@ -443,55 +430,44 @@ bool AddEntityForLagCompensation(int iEntity)
 	if(g_iNumEntities == MAX_ENTITIES)
 		return false;
 
-	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
+	for(int i = 0; i < g_iNumEntities; i++)
 	{
-		if(!g_aEntityLagData[i].iEntity)
-			continue;
-		j--;
-
 		if(g_aEntityLagData[i].iEntity == iEntity)
 			return true;
 	}
 
-	for(int i = 0; i < MAX_ENTITIES; i++)
+	int i = g_iNumEntities;
+	g_iNumEntities++;
+
+	g_aEntityLagData[i].iEntity = iEntity;
+	g_aEntityLagData[i].iRecordIndex = -1;
+	g_aEntityLagData[i].iNumRecords = 0;
+	g_aEntityLagData[i].iRecordsValid = 0;
+	g_aEntityLagData[i].iDeleted = 0;
+	g_aEntityLagData[i].iNotMoving = MAX_RECORDS;
+	g_aEntityLagData[i].bRestore = false;
+
 	{
-		if(g_aEntityLagData[i].iEntity)
-			continue;
+		char sClassname[64];
+		GetEntityClassname(g_aEntityLagData[i].iEntity, sClassname, sizeof(sClassname));
 
-		g_iNumEntities++;
+		char sTargetname[64];
+		GetEntPropString(g_aEntityLagData[i].iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
 
-		g_aEntityLagData[i].iEntity = iEntity;
-		g_aEntityLagData[i].iRecordIndex = -1;
-		g_aEntityLagData[i].iNumRecords = 0;
-		g_aEntityLagData[i].iRecordsValid = 0;
-		g_aEntityLagData[i].iDeleted = 0;
-		g_aEntityLagData[i].bRestore = false;
-		g_aEntityLagData[i].bMoving = false;
+		int iHammerID = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "m_iHammerID");
 
-		{
-			char sClassname[64];
-			GetEntityClassname(g_aEntityLagData[i].iEntity, sClassname, sizeof(sClassname));
+		LogMessage("[%d] added entity %d (%s)\"%s\"(#%d) under index %d", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID, i);
 
-			char sTargetname[64];
-			GetEntPropString(g_aEntityLagData[i].iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
-
-			int iHammerID = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "m_iHammerID");
-
-			LogMessage("[%d] added entity %d (%s)\"%s\"(#%d) under index %d", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID, i);
-
-			float vecOrigin[3];
-			GetEntPropVector(iEntity, Prop_Data, "m_vecAbsOrigin", vecOrigin);
-			LogMessage("%f %f %f",
-				vecOrigin[0],
-				vecOrigin[1],
-				vecOrigin[2]
-			);
-		}
-
-		return true;
+		float vecOrigin[3];
+		GetEntPropVector(iEntity, Prop_Data, "m_vecAbsOrigin", vecOrigin);
+		LogMessage("%f %f %f",
+			vecOrigin[0],
+			vecOrigin[1],
+			vecOrigin[2]
+		);
 	}
 
-	return false;
+	return true;
 }
 
 public void OnEntitySpawned(int entity, const char[] classname)
@@ -560,18 +536,56 @@ public void OnEntityDestroyed(int entity)
 
 	g_bNoPhysics[entity] = false;
 
-	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
+	for(int i = 0; i < g_iNumEntities; i++)
 	{
-		if(!g_aEntityLagData[i].iEntity)
-			continue;
-		j--;
-
 		if(g_aEntityLagData[i].iEntity != entity)
 			continue;
 
-		g_aEntityLagData[i].iEntity = 0;
-		g_iNumEntities--;
+		RemoveRecord(i);
 		LogMessage("[%d] normal deleted: %d / %d", GetGameTickCount(), i, entity);
 		return;
 	}
+}
+
+void RemoveRecord(int index)
+{
+	g_aEntityLagData[index].iEntity = 0;
+
+	for(int src = index + 1; src < g_iNumEntities; src++)
+	{
+		int dest = src - 1;
+
+		EntityLagData_Copy(g_aEntityLagData[dest], g_aEntityLagData[src]);
+		g_aEntityLagData[src].iEntity = 0;
+
+		int iNumRecords = g_aEntityLagData[dest].iNumRecords;
+		for(int i = 0; i < iNumRecords; i++)
+		{
+			LagRecord_Copy(g_aaLagRecords[dest][i], g_aaLagRecords[src][i]);
+		}
+	}
+
+	g_iNumEntities--;
+}
+
+void EntityLagData_Copy(EntityLagData obj, const EntityLagData other)
+{
+	obj.iEntity = other.iEntity;
+	obj.iRecordIndex = other.iRecordIndex;
+	obj.iNumRecords = other.iNumRecords;
+	obj.iRecordsValid = other.iRecordsValid;
+	obj.iDeleted = other.iDeleted;
+	obj.iNotMoving = other.iNotMoving;
+	obj.bRestore = other.bRestore;
+	LagRecord_Copy(obj.RestoreData, other.RestoreData);
+}
+
+void LagRecord_Copy(LagRecord obj, const LagRecord other)
+{
+	obj.vecOrigin[0] = other.vecOrigin[0];
+	obj.vecOrigin[1] = other.vecOrigin[1];
+	obj.vecOrigin[2] = other.vecOrigin[2];
+	obj.vecAngles[0] = other.vecAngles[0];
+	obj.vecAngles[1] = other.vecAngles[1];
+	obj.vecAngles[2] = other.vecAngles[2];
 }
