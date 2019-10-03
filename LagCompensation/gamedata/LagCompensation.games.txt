@@ -10,6 +10,18 @@
                 "linux"         "@_ZN11CBaseEntity20PhysicsTouchTriggersEPK6Vector"
             }
 
+            "::UTIL_Remove"
+            {
+                "library"       "server"
+                "linux"         "@_Z11UTIL_RemoveP11CBaseEntity"
+            }
+
+            "CCSGameRules::RestartRound"
+            {
+                "library"       "server"
+                "linux"         "@_ZN12CCSGameRules12RestartRoundEv"
+            }
+
             "GetAbsOrigin"
             {
                 "library"       "server"
@@ -35,12 +47,6 @@
             {
                 "library"       "server"
                 "linux"         "@_ZN11CBaseEntity12SetAbsAnglesERK6QAngle"
-            }
-
-            "::UTIL_Remove"
-            {
-                "library"       "server"
-                "linux"         "@_Z11UTIL_RemoveP11CBaseEntity"
             }
         }
 
@@ -73,6 +79,14 @@
                         "type"    "cbaseentity"
                     }
                 }
+            }
+
+            "CCSGameRules__RestartRound"
+            {
+                "signature"     "CCSGameRules::RestartRound"
+                "callconv"      "thiscall"
+                "return"        "void"
+                "this"          "ignore"
             }
         }
     }

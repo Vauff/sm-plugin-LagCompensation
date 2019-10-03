@@ -19,7 +19,7 @@ public Plugin myinfo =
 bool g_bLateLoad = false;
 
 #define MAX_RECORDS 32
-#define MAX_ENTITIES 32
+#define MAX_ENTITIES 64
 //#define DEBUG
 
 enum struct LagRecord
@@ -52,9 +52,9 @@ Handle g_hSetAbsAngles;
 bool g_bBlockPhysics = false;
 bool g_bNoPhysics[2048];
 Handle g_hPhysicsTouchTriggers;
-
-bool g_bRoundEnded = false;
 Handle g_hUTIL_Remove;
+Handle g_hRestartRound;
+
 
 public void OnPluginStart()
 {
@@ -119,45 +119,57 @@ public void OnPluginStart()
 		SetFailState("Failed to detour CBaseEntity__PhysicsTouchTriggers.");
 	}
 
-	// UTIL_Remove
+	// ::UTIL_Remove
 	g_hUTIL_Remove = DHookCreateFromConf(hGameData, "UTIL_Remove");
 	if(!g_hUTIL_Remove)
 	{
 		delete hGameData;
 		SetFailState("Failed to setup detour for UTIL_Remove");
 	}
-	delete hGameData;
 
 	if(!DHookEnableDetour(g_hUTIL_Remove, false, Detour_OnUTIL_Remove))
+	{
+		delete hGameData;
 		SetFailState("Failed to detour UTIL_Remove.");
+	}
 
-	HookEvent("round_end", Event_RoundEnd, EventHookMode_PostNoCopy);
-	HookEvent("round_start", Event_RoundStart, EventHookMode_PostNoCopy);
+	// CCSGameRules::RestartRound
+	g_hRestartRound = DHookCreateFromConf(hGameData, "CCSGameRules__RestartRound");
+	if(!g_hRestartRound)
+	{
+		delete hGameData;
+		SetFailState("Failed to setup detour for CCSGameRules__RestartRound");
+	}
+	delete hGameData;
+
+	if(!DHookEnableDetour(g_hRestartRound, false, Detour_OnRestartRound))
+		SetFailState("Failed to detour CCSGameRules__RestartRound.");
+}
+
+
+public void OnPluginEnd()
+{
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
+			continue;
+
+		if(g_aEntityLagData[i].iDeleted)
+		{
+			PrintToBoth("[%d] !!!!!!!!!!! RemoveEdict: %d / ent: %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
+			// calls OnEntityDestroyed right away
+			// which calls RemoveRecord
+			// which moves the next element to our current position
+			RemoveEdict(g_aEntityLagData[i].iEntity);
+			i--; continue;
+		}
+	}
 }
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
 	g_bLateLoad = late;
 	return APLRes_Success;
-}
-
-public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
-{
-	g_bRoundEnded = true;
-
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		g_aEntityLagData[i].iEntity = 0;
-		LogMessage("[%d] round_end deleted: %d / %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
-		return;
-	}
-
-	g_iNumEntities = 0;
-}
-
-public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
-{
-	g_bRoundEnded = false;
 }
 
 public MRESReturn Detour_OnPhysicsTouchTriggers(int entity, Handle hReturn, Handle hParams)
@@ -178,9 +190,6 @@ public MRESReturn Detour_OnPhysicsTouchTriggers(int entity, Handle hReturn, Hand
 
 public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
 {
-	if(g_bRoundEnded)
-		return MRES_Ignored;
-
 	int entity = DHookGetParam(hParams, 1);
 	if(entity < 0 || entity > sizeof(g_bNoPhysics))
 		return MRES_Ignored;
@@ -195,9 +204,22 @@ public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
 		if(!g_aEntityLagData[i].iDeleted)
 			g_aEntityLagData[i].iDeleted = GetGameTickCount();
 
-		LogMessage("[%d] !!!!!!!!!!! Detour_OnUTIL_Remove: %d / ent: %d", GetGameTickCount(), i, entity);
+		PrintToBoth("[%d] !!!!!!!!!!! Detour_OnUTIL_Remove: %d / ent: %d", GetGameTickCount(), i, entity);
 		return MRES_Supercede;
 	}
+
+	return MRES_Ignored;
+}
+
+public MRESReturn Detour_OnRestartRound()
+{
+	PrintToBoth("Detour_OnRestartRound with %d entries.", g_iNumEntities);
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		g_aEntityLagData[i].iEntity = -1;
+	}
+
+	g_iNumEntities = 0;
 
 	return MRES_Ignored;
 }
@@ -239,7 +261,7 @@ public void OnRunThinkFunctions(bool simulating)
 
 		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
 		{
-			LogMessage("!!!!!!!!!!! OnRunThinkFunctions SHIT deleted: %d / %d", i, g_aEntityLagData[i].iEntity);
+			PrintToBoth("!!!!!!!!!!! OnRunThinkFunctions SHIT deleted: %d / %d", i, g_aEntityLagData[i].iEntity);
 			RemoveRecord(i);
 			i--; continue;
 		}
@@ -248,7 +270,7 @@ public void OnRunThinkFunctions(bool simulating)
 		{
 			if(g_aEntityLagData[i].iDeleted + MAX_RECORDS < GetGameTickCount())
 			{
-				LogMessage("[%d] !!!!!!!!!!! RemoveEdict: %d / ent: %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
+				PrintToBoth("[%d] !!!!!!!!!!! RemoveEdict: %d / ent: %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
 				// calls OnEntityDestroyed right away
 				// which calls RemoveRecord
 				// which moves the next element to our current position
@@ -303,7 +325,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 			iRecordIndex += MAX_RECORDS;
 
 		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, client, g_aaLagRecords[i][iRecordIndex]);
-		g_aEntityLagData[i].bRestore = !g_aEntityLagData[i].iDeleted;
+		g_aEntityLagData[i].bRestore = true;//!g_aEntityLagData[i].iDeleted;
 
 #if defined DEBUG
 		LogMessage("2 [%d] index %d, Entity %d -> delta = %d | Record = %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, delta, iRecordIndex);
@@ -363,7 +385,7 @@ public void OnRunThinkFunctionsPost(bool simulating)
 		LagRecord TmpRecord;
 		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, TmpRecord);
 
-		if(g_aEntityLagData[i].iNumRecords)
+		// sleep detection
 		{
 			int iOldRecord = g_aEntityLagData[i].iRecordIndex;
 
@@ -373,12 +395,32 @@ public void OnRunThinkFunctionsPost(bool simulating)
 			{
 				g_aEntityLagData[i].iNotMoving++;
 				if(g_aEntityLagData[i].iNotMoving == MAX_RECORDS)
-					LogMessage("[%d] index %d, entity %d GOING TO SLEEP", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
+				{
+					char sClassname[64];
+					GetEntityClassname(g_aEntityLagData[i].iEntity, sClassname, sizeof(sClassname));
+
+					char sTargetname[64];
+					GetEntPropString(g_aEntityLagData[i].iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+
+					int iHammerID = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "m_iHammerID");
+
+					PrintToBoth("[%d] entity %d (%s)\"%s\"(#%d) index %d GOING TO SLEEP", GetGameTickCount(), g_aEntityLagData[i].iEntity, sClassname, sTargetname, iHammerID, i);
+				}
 			}
 			else
 			{
 				if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
-					LogMessage("[%d] index %d, entity %d WAKING UP", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
+				{
+					char sClassname[64];
+					GetEntityClassname(g_aEntityLagData[i].iEntity, sClassname, sizeof(sClassname));
+
+					char sTargetname[64];
+					GetEntPropString(g_aEntityLagData[i].iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+
+					int iHammerID = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "m_iHammerID");
+
+					PrintToBoth("[%d] entity %d (%s)\"%s\"(#%d) index %d WAKING UP", GetGameTickCount(), g_aEntityLagData[i].iEntity, sClassname, sTargetname, iHammerID, i);
+				}
 				g_aEntityLagData[i].iNotMoving = 0;
 			}
 
@@ -418,10 +460,12 @@ void RecordDataIntoRecord(int iEntity, LagRecord Record)
 void RestoreEntityFromRecord(int iEntity, int iFilter, LagRecord Record)
 {
 	FilterTriggerMoved(iFilter);
+	BlockSolidMoved(iFilter);
 
 	SDKCall(g_hSetAbsAngles, iEntity, Record.vecAngles);
 	SDKCall(g_hSetAbsOrigin, iEntity, Record.vecOrigin);
 
+	BlockSolidMoved(-1);
 	FilterTriggerMoved(-1);
 }
 
@@ -440,12 +484,14 @@ bool AddEntityForLagCompensation(int iEntity)
 	g_iNumEntities++;
 
 	g_aEntityLagData[i].iEntity = iEntity;
-	g_aEntityLagData[i].iRecordIndex = -1;
-	g_aEntityLagData[i].iNumRecords = 0;
-	g_aEntityLagData[i].iRecordsValid = 0;
+	g_aEntityLagData[i].iRecordIndex = 0;
+	g_aEntityLagData[i].iNumRecords = 1;
+	g_aEntityLagData[i].iRecordsValid = 1;
 	g_aEntityLagData[i].iDeleted = 0;
 	g_aEntityLagData[i].iNotMoving = MAX_RECORDS;
 	g_aEntityLagData[i].bRestore = false;
+
+	RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aaLagRecords[i][0]);
 
 	{
 		char sClassname[64];
@@ -456,15 +502,7 @@ bool AddEntityForLagCompensation(int iEntity)
 
 		int iHammerID = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "m_iHammerID");
 
-		LogMessage("[%d] added entity %d (%s)\"%s\"(#%d) under index %d", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID, i);
-
-		float vecOrigin[3];
-		GetEntPropVector(iEntity, Prop_Data, "m_vecAbsOrigin", vecOrigin);
-		LogMessage("%f %f %f",
-			vecOrigin[0],
-			vecOrigin[1],
-			vecOrigin[2]
-		);
+		PrintToBoth("[%d] added entity %d (%s)\"%s\"(#%d) under index %d", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID, i);
 	}
 
 	return true;
@@ -481,7 +519,7 @@ public void OnEntitySpawned(int entity, const char[] classname)
 		return;
 	}
 
-	if(!StrEqual(classname, "trigger_hurt"))
+	if(!(StrEqual(classname, "trigger_hurt")))
 		return;
 
 	int iParent = entity;
@@ -510,14 +548,6 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	if(iParent == -1)
 		return;
 
-	char sTargetname[64];
-	GetEntPropString(entity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
-
-	char sParentTargetname[64];
-	GetEntPropString(iParent, Prop_Data, "m_iName", sParentTargetname, sizeof(sParentTargetname));
-
-	LogMessage("test: %s %s | parent: %s %s", classname, sTargetname, sParentClassname, sParentTargetname);
-
 	if(!bGoodParents)
 		return;
 
@@ -526,7 +556,15 @@ public void OnEntitySpawned(int entity, const char[] classname)
 
 	g_bNoPhysics[entity] = true;
 
-	LogMessage("added %s %s | parent: %s %s", classname, sTargetname, sParentClassname, sParentTargetname);
+	{
+		char sTargetname[64];
+		GetEntPropString(entity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+
+		char sParentTargetname[64];
+		GetEntPropString(iParent, Prop_Data, "m_iName", sParentTargetname, sizeof(sParentTargetname));
+
+		PrintToBoth("added %s %s | parent: %s %s", classname, sTargetname, sParentClassname, sParentTargetname);
+	}
 }
 
 public void OnEntityDestroyed(int entity)
@@ -542,21 +580,32 @@ public void OnEntityDestroyed(int entity)
 			continue;
 
 		RemoveRecord(i);
-		LogMessage("[%d] normal deleted: %d / %d", GetGameTickCount(), i, entity);
 		return;
 	}
 }
 
 void RemoveRecord(int index)
 {
-	g_aEntityLagData[index].iEntity = 0;
+	{
+		char sClassname[64];
+		GetEntityClassname(g_aEntityLagData[index].iEntity, sClassname, sizeof(sClassname));
+
+		char sTargetname[64];
+		GetEntPropString(g_aEntityLagData[index].iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+
+		int iHammerID = GetEntProp(g_aEntityLagData[index].iEntity, Prop_Data, "m_iHammerID");
+
+		PrintToBoth("[%d] RemoveRecord %d / %d (%s)\"%s\"(#%d), num: %d", GetGameTickCount(), index, g_aEntityLagData[index].iEntity, sClassname, sTargetname, iHammerID, g_iNumEntities);
+	}
+
+	g_aEntityLagData[index].iEntity = -1;
 
 	for(int src = index + 1; src < g_iNumEntities; src++)
 	{
 		int dest = src - 1;
 
 		EntityLagData_Copy(g_aEntityLagData[dest], g_aEntityLagData[src]);
-		g_aEntityLagData[src].iEntity = 0;
+		g_aEntityLagData[src].iEntity = -1;
 
 		int iNumRecords = g_aEntityLagData[dest].iNumRecords;
 		for(int i = 0; i < iNumRecords; i++)
@@ -588,4 +637,20 @@ void LagRecord_Copy(LagRecord obj, const LagRecord other)
 	obj.vecAngles[0] = other.vecAngles[0];
 	obj.vecAngles[1] = other.vecAngles[1];
 	obj.vecAngles[2] = other.vecAngles[2];
+}
+
+
+stock void PrintToBoth(const char[] format, any ...)
+{
+	char buffer[254];
+	VFormat(buffer, sizeof(buffer), format, 2);
+	LogMessage(buffer);
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientInGame(i))
+		{
+			PrintToConsole(i, "%s", buffer);
+		}
+	}
 }
