@@ -145,15 +145,16 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 {
 	g_bRoundEnded = true;
 
-	for(int i = 0; i < MAX_ENTITIES; i++)
+	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
 	{
-		if(g_aEntityLagData[i].iEntity)
-		{
-			LogMessage("[%d] round_end deleted: %d / %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
-			g_aEntityLagData[i].iEntity = 0;
-			g_iNumEntities--;
-			return;
-		}
+		if(!g_aEntityLagData[i].iEntity)
+			continue;
+		j--;
+
+		g_aEntityLagData[i].iEntity = 0;
+		g_iNumEntities--;
+		LogMessage("[%d] round_end deleted: %d / %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
+		return;
 	}
 }
 
@@ -187,8 +188,12 @@ public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
 	if(entity < 0 || entity > sizeof(g_bNoPhysics))
 		return MRES_Ignored;
 
-	for(int i = 0; i < MAX_ENTITIES; i++)
+	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
 	{
+		if(!g_aEntityLagData[i].iEntity)
+			continue;
+		j--;
+
 		if(g_aEntityLagData[i].iEntity != entity)
 			continue;
 
@@ -234,9 +239,13 @@ public void OnClientPutInServer(int client)
 
 public void OnRunThinkFunctions(bool simulating)
 {
-	for(int i = 0; i < MAX_ENTITIES; i++)
+	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
 	{
-		if(g_aEntityLagData[i].iEntity == 0 || !g_aEntityLagData[i].bMoving)
+		if(!g_aEntityLagData[i].iEntity)
+			continue;
+		j--;
+
+		if(!g_aEntityLagData[i].bMoving)
 			continue;
 
 		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
@@ -258,6 +267,7 @@ public void OnRunThinkFunctions(bool simulating)
 		}
 
 		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aEntityLagData[i].RestoreData);
+
 #if defined DEBUG
 		LogMessage("1 [%d] [%d] index %d, RECORD entity %d", GetGameTickCount(), i, simulating, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
 		LogMessage("%f %f %f",
@@ -278,9 +288,13 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	if(delta < 0)
 		delta = 0;
 
-	for(int i = 0; i < MAX_ENTITIES; i++)
+	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
 	{
-		if(g_aEntityLagData[i].iEntity == 0 || !g_aEntityLagData[i].bMoving)
+		if(!g_aEntityLagData[i].iEntity)
+			continue;
+		j--;
+
+		if(!g_aEntityLagData[i].bMoving)
 			continue;
 
 		if(delta >= g_aEntityLagData[i].iNumRecords)
@@ -318,9 +332,13 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 
 public void OnPostPlayerThinkFunctions()
 {
-	for(int i = 0; i < MAX_ENTITIES; i++)
+	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
 	{
-		if(g_aEntityLagData[i].iEntity == 0 || !g_aEntityLagData[i].bRestore)
+		if(!g_aEntityLagData[i].iEntity)
+			continue;
+		j--;
+
+		if(!g_aEntityLagData[i].bRestore)
 			continue;
 
 		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, 0, g_aEntityLagData[i].RestoreData);
@@ -341,10 +359,11 @@ public void OnPostPlayerThinkFunctions()
 
 public void OnRunThinkFunctionsPost(bool simulating)
 {
-	for(int i = 0; i < MAX_ENTITIES; i++)
+	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
 	{
-		if(g_aEntityLagData[i].iEntity == 0)
+		if(!g_aEntityLagData[i].iEntity)
 			continue;
+		j--;
 
 		if(g_aEntityLagData[i].iDeleted)
 		{
@@ -386,9 +405,7 @@ public void OnRunThinkFunctionsPost(bool simulating)
 			g_aEntityLagData[i].iRecordIndex = 0;
 
 		if(g_aEntityLagData[i].iNumRecords < MAX_RECORDS)
-		{
 			g_aEntityLagData[i].iRecordsValid = ++g_aEntityLagData[i].iNumRecords;
-		}
 
 		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex]);
 
@@ -423,15 +440,22 @@ void RestoreEntityFromRecord(int iEntity, int iFilter, LagRecord Record)
 
 bool AddEntityForLagCompensation(int iEntity)
 {
-	for(int i = 0; i < MAX_ENTITIES; i++)
+	if(g_iNumEntities == MAX_ENTITIES)
+		return false;
+
+	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
 	{
+		if(!g_aEntityLagData[i].iEntity)
+			continue;
+		j--;
+
 		if(g_aEntityLagData[i].iEntity == iEntity)
 			return true;
 	}
 
 	for(int i = 0; i < MAX_ENTITIES; i++)
 	{
-		if(g_aEntityLagData[i].iEntity != 0)
+		if(g_aEntityLagData[i].iEntity)
 			continue;
 
 		g_iNumEntities++;
@@ -454,17 +478,19 @@ bool AddEntityForLagCompensation(int iEntity)
 			int iHammerID = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "m_iHammerID");
 
 			LogMessage("[%d] added entity %d (%s)\"%s\"(#%d) under index %d", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID, i);
+
+			float vecOrigin[3];
+			GetEntPropVector(iEntity, Prop_Data, "m_vecAbsOrigin", vecOrigin);
+			LogMessage("%f %f %f",
+				vecOrigin[0],
+				vecOrigin[1],
+				vecOrigin[2]
+			);
 		}
 
-		float vecOrigin[3];
-		GetEntPropVector(iEntity, Prop_Data, "m_vecAbsOrigin", vecOrigin);
-		LogMessage("%f %f %f",
-			vecOrigin[0],
-			vecOrigin[1],
-			vecOrigin[2]
-		);
 		return true;
 	}
+
 	return false;
 }
 
@@ -473,7 +499,7 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	if(entity < 0 || entity > sizeof(g_bNoPhysics))
 		return;
 
-	if(StrEqual(classname, "func_physbox"))
+	if(!strncmp(classname, "func_physbox", 12))
 	{
 		AddEntityForLagCompensation(entity);
 		return;
@@ -492,7 +518,13 @@ public void OnEntitySpawned(int entity, const char[] classname)
 			break;
 
 		GetEntityClassname(iParent, sParentClassname, sizeof(sParentClassname));
-		if(StrEqual(sParentClassname, "func_movelinear") || StrEqual(sParentClassname, "func_door") || StrEqual(sParentClassname, "func_tracktrain") || StrEqual(sParentClassname, "func_physbox"))
+		if(strncmp(sParentClassname, "func_", 5))
+			continue;
+
+		if(StrEqual(sParentClassname[5], "movelinear") ||
+			StrEqual(sParentClassname[5], "door") ||
+			StrEqual(sParentClassname[5], "tracktrain") ||
+			!strncmp(sParentClassname[5], "physbox", 7))
 		{
 			bGoodParents = true;
 			break;
@@ -513,12 +545,6 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	if(!bGoodParents)
 		return;
 
-	int SolidFlags = GetEntProp(iParent, Prop_Data, "m_usSolidFlags");
-	LogMessage("SolidFlags: %d", SolidFlags);
-
-	if(!(SolidFlags & 0x0004) && false) // FSOLID_NOT_SOLID
-		return;
-
 	if(!AddEntityForLagCompensation(entity))
 		return;
 
@@ -534,14 +560,18 @@ public void OnEntityDestroyed(int entity)
 
 	g_bNoPhysics[entity] = false;
 
-	for(int i = 0; i < MAX_ENTITIES; i++)
+	for(int i = 0, j = g_iNumEntities; i < MAX_ENTITIES, j; i++)
 	{
-		if(g_aEntityLagData[i].iEntity == entity)
-		{
-			LogMessage("[%d] normal deleted: %d / %d", GetGameTickCount(), i, entity);
-			g_aEntityLagData[i].iEntity = 0;
-			g_iNumEntities--;
-			return;
-		}
+		if(!g_aEntityLagData[i].iEntity)
+			continue;
+		j--;
+
+		if(g_aEntityLagData[i].iEntity != entity)
+			continue;
+
+		g_aEntityLagData[i].iEntity = 0;
+		g_iNumEntities--;
+		LogMessage("[%d] normal deleted: %d / %d", GetGameTickCount(), i, entity);
+		return;
 	}
 }
