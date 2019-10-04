@@ -149,6 +149,10 @@ public void OnPluginStart()
 
 public void OnPluginEnd()
 {
+	FilterSolidMoved(g_bNoPhysics, 0);
+
+	DHookDisableDetour(g_hUTIL_Remove, false, Detour_OnUTIL_Remove);
+
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
 		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
@@ -291,6 +295,8 @@ public void OnRunThinkFunctions(bool simulating)
 		);
 #endif
 	}
+
+	FilterSolidMoved(g_bNoPhysics, sizeof(g_bNoPhysics));
 }
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
@@ -314,10 +320,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		{
 			int simtick = GetGameTickCount() - delta;
 			if(simtick > g_aEntityLagData[i].iDeleted)
-			{
-				// TODO: completly block player from touching trigger
 				continue;
-			}
 		}
 
 		int iRecordIndex = g_aEntityLagData[i].iRecordIndex - delta;
@@ -325,7 +328,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 			iRecordIndex += MAX_RECORDS;
 
 		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, client, g_aaLagRecords[i][iRecordIndex]);
-		g_aEntityLagData[i].bRestore = true;//!g_aEntityLagData[i].iDeleted;
+		g_aEntityLagData[i].bRestore = !g_aEntityLagData[i].iDeleted;
 
 #if defined DEBUG
 		LogMessage("2 [%d] index %d, Entity %d -> delta = %d | Record = %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, delta, iRecordIndex);
@@ -342,6 +345,8 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 
 public void OnPostPlayerThinkFunctions()
 {
+	FilterSolidMoved(g_bNoPhysics, 0);
+
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
 		if(!g_aEntityLagData[i].bRestore)
