@@ -518,7 +518,7 @@ void RecordDataIntoRecord(int iEntity, LagRecord Record)
 void RestoreEntityFromRecord(int iEntity, int iFilter, LagRecord Record)
 {
 	FilterTriggerMoved(iFilter);
-	BlockSolidMoved(iFilter);
+	BlockSolidMoved(iEntity);
 
 	SDKCall(g_hSetAbsAngles, iEntity, Record.vecAngles);
 	SDKCall(g_hSetAbsOrigin, iEntity, Record.vecOrigin);
