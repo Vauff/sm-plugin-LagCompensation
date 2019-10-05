@@ -43,25 +43,38 @@ enum struct EntityLagData
 LagRecord g_aaLagRecords[MAX_ENTITIES][MAX_RECORDS];
 EntityLagData g_aEntityLagData[MAX_ENTITIES];
 int g_iNumEntities = 0;
+bool g_bCleaningUp = false;
 
+Handle g_hPhysicsTouchTriggers;
 Handle g_hGetAbsOrigin;
 Handle g_hSetAbsOrigin;
 Handle g_hGetAbsAngles;
 Handle g_hSetAbsAngles;
 
-bool g_bBlockPhysics = false;
-bool g_bNoPhysics[2048];
-Handle g_hPhysicsTouchTriggers;
+Handle g_hPhysicsTouchTriggersDetour;
 Handle g_hUTIL_Remove;
 Handle g_hRestartRound;
 
+bool g_bBlockPhysics = false;
+char g_aBlockPhysics[2048];
+char g_aaDeleted[MAXPLAYERS + 1][2048];
 
 public void OnPluginStart()
 {
+	PrintToServer("MAXPLAYERS = %d / MaxClients = %d", MAXPLAYERS, MaxClients);
 	Handle hGameData = LoadGameConfigFile("LagCompensation.games");
 	if(!hGameData)
 		SetFailState("Failed to load LagCompensation gamedata.");
 
+	// CBaseEntity::PhysicsTouchTriggers
+	StartPrepSDKCall(SDKCall_Entity);
+	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "CBaseEntity::PhysicsTouchTriggers"))
+	{
+		delete hGameData;
+		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"CBaseEntity::PhysicsTouchTriggers\") failed!");
+	}
+	PrepSDKCall_AddParameter(SDKType_Vector, SDKPass_ByRef);
+	g_hPhysicsTouchTriggers = EndPrepSDKCall();
 
 	// CBaseEntity::GetAbsOrigin
 	StartPrepSDKCall(SDKCall_Entity);
@@ -106,14 +119,14 @@ public void OnPluginStart()
 
 
 	// CBaseEntity::PhysicsTouchTriggers
-	g_hPhysicsTouchTriggers = DHookCreateFromConf(hGameData, "CBaseEntity__PhysicsTouchTriggers");
-	if(!g_hPhysicsTouchTriggers)
+	g_hPhysicsTouchTriggersDetour = DHookCreateFromConf(hGameData, "CBaseEntity__PhysicsTouchTriggers");
+	if(!g_hPhysicsTouchTriggersDetour)
 	{
 		delete hGameData;
 		SetFailState("Failed to setup detour for CBaseEntity__PhysicsTouchTriggers");
 	}
 
-	if(!DHookEnableDetour(g_hPhysicsTouchTriggers, false, Detour_OnPhysicsTouchTriggers))
+	if(!DHookEnableDetour(g_hPhysicsTouchTriggersDetour, false, Detour_OnPhysicsTouchTriggers))
 	{
 		delete hGameData;
 		SetFailState("Failed to detour CBaseEntity__PhysicsTouchTriggers.");
@@ -140,16 +153,44 @@ public void OnPluginStart()
 		delete hGameData;
 		SetFailState("Failed to setup detour for CCSGameRules__RestartRound");
 	}
-	delete hGameData;
 
 	if(!DHookEnableDetour(g_hRestartRound, false, Detour_OnRestartRound))
+	{
+		delete hGameData;
 		SetFailState("Failed to detour CCSGameRules__RestartRound.");
+	}
+	delete hGameData;
+
+
+	RegAdminCmd("sm_unlag", Command_AddLagCompensation, ADMFLAG_GENERIC, "sm_unlag <entidx>");
+
+
+	FilterClientEntityMap(g_aaDeleted, true);
 }
 
+public Action Command_AddLagCompensation(int client, int argc)
+{
+	if(argc < 1)
+	{
+		ReplyToCommand(client, "[SM] Usage: sm_unlag <entidx>");
+		return Plugin_Handled;
+	}
+
+	char sArgs[32];
+	GetCmdArg(1, sArgs, sizeof(sArgs));
+
+	int entity = StringToInt(sArgs);
+
+	AddEntityForLagCompensation(entity);
+	g_aBlockPhysics[entity] = 1;
+
+	return Plugin_Handled;
+}
 
 public void OnPluginEnd()
 {
-	FilterSolidMoved(g_bNoPhysics, 0);
+	g_bCleaningUp = true;
+	FilterClientEntityMap(g_aaDeleted, false);
 
 	DHookDisableDetour(g_hUTIL_Remove, false, Detour_OnUTIL_Remove);
 
@@ -160,12 +201,7 @@ public void OnPluginEnd()
 
 		if(g_aEntityLagData[i].iDeleted)
 		{
-			PrintToBoth("[%d] !!!!!!!!!!! RemoveEdict: %d / ent: %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
-			// calls OnEntityDestroyed right away
-			// which calls RemoveRecord
-			// which moves the next element to our current position
 			RemoveEdict(g_aEntityLagData[i].iEntity);
-			i--; continue;
 		}
 	}
 }
@@ -181,10 +217,10 @@ public MRESReturn Detour_OnPhysicsTouchTriggers(int entity, Handle hReturn, Hand
 	if(!g_bBlockPhysics)
 		return MRES_Ignored;
 
-	if(entity < 0 || entity > sizeof(g_bNoPhysics))
+	if(entity < 0 || entity > sizeof(g_aBlockPhysics))
 		return MRES_Ignored;
 
-	if(g_bNoPhysics[entity])
+	if(g_aBlockPhysics[entity])
 	{
 		//LogMessage("blocked physics on %d", entity);
 		return MRES_Supercede;
@@ -194,8 +230,11 @@ public MRESReturn Detour_OnPhysicsTouchTriggers(int entity, Handle hReturn, Hand
 
 public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
 {
+	if(g_bCleaningUp)
+		return MRES_Ignored;
+
 	int entity = DHookGetParam(hParams, 1);
-	if(entity < 0 || entity > sizeof(g_bNoPhysics))
+	if(entity < 0 || entity > sizeof(g_aBlockPhysics))
 		return MRES_Ignored;
 
 	for(int i = 0; i < g_iNumEntities; i++)
@@ -203,10 +242,10 @@ public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
 		if(g_aEntityLagData[i].iEntity != entity)
 			continue;
 
-		SetEntPropEnt(entity, Prop_Data, "m_pParent", 0);
-
 		if(!g_aEntityLagData[i].iDeleted)
+		{
 			g_aEntityLagData[i].iDeleted = GetGameTickCount();
+		}
 
 		PrintToBoth("[%d] !!!!!!!!!!! Detour_OnUTIL_Remove: %d / ent: %d", GetGameTickCount(), i, entity);
 		return MRES_Supercede;
@@ -217,14 +256,29 @@ public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
 
 public MRESReturn Detour_OnRestartRound()
 {
+	g_bCleaningUp = true;
 	PrintToBoth("Detour_OnRestartRound with %d entries.", g_iNumEntities);
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
+		g_aBlockPhysics[g_aEntityLagData[i].iEntity] = 0;
+
+		if(g_aEntityLagData[i].iDeleted)
+		{
+			for(int client = 1; client <= MaxClients; client++)
+			{
+				g_aaDeleted[client][g_aEntityLagData[i].iEntity] = 0;
+			}
+
+			if(IsValidEntity(g_aEntityLagData[i].iEntity))
+				RemoveEdict(g_aEntityLagData[i].iEntity);
+		}
+
 		g_aEntityLagData[i].iEntity = -1;
 	}
 
 	g_iNumEntities = 0;
 
+	g_bCleaningUp = false;
 	return MRES_Ignored;
 }
 
@@ -260,12 +314,9 @@ public void OnRunThinkFunctions(bool simulating)
 {
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
-		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
-			continue;
-
 		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
 		{
-			PrintToBoth("!!!!!!!!!!! OnRunThinkFunctions SHIT deleted: %d / %d", i, g_aEntityLagData[i].iEntity);
+			//PrintToBoth("!!!!!!!!!!! OnRunThinkFunctions SHIT deleted: %d / %d", i, g_aEntityLagData[i].iEntity);
 			RemoveRecord(i);
 			i--; continue;
 		}
@@ -284,6 +335,9 @@ public void OnRunThinkFunctions(bool simulating)
 			continue;
 		}
 
+		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
+			continue;
+
 		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aEntityLagData[i].RestoreData);
 
 #if defined DEBUG
@@ -295,8 +349,6 @@ public void OnRunThinkFunctions(bool simulating)
 		);
 #endif
 	}
-
-	FilterSolidMoved(g_bNoPhysics, sizeof(g_bNoPhysics));
 }
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
@@ -320,7 +372,10 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		{
 			int simtick = GetGameTickCount() - delta;
 			if(simtick > g_aEntityLagData[i].iDeleted)
+			{
+				g_aaDeleted[client][g_aEntityLagData[i].iEntity] = 1;
 				continue;
+			}
 		}
 
 		int iRecordIndex = g_aEntityLagData[i].iRecordIndex - delta;
@@ -345,8 +400,6 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 
 public void OnPostPlayerThinkFunctions()
 {
-	FilterSolidMoved(g_bNoPhysics, 0);
-
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
 		if(!g_aEntityLagData[i].bRestore)
@@ -470,12 +523,20 @@ void RestoreEntityFromRecord(int iEntity, int iFilter, LagRecord Record)
 	SDKCall(g_hSetAbsAngles, iEntity, Record.vecAngles);
 	SDKCall(g_hSetAbsOrigin, iEntity, Record.vecOrigin);
 
+	if(iFilter)
+	{
+		SDKCall(g_hPhysicsTouchTriggers, iEntity, Record.vecOrigin);
+	}
+
 	BlockSolidMoved(-1);
 	FilterTriggerMoved(-1);
 }
 
 bool AddEntityForLagCompensation(int iEntity)
 {
+	if(g_bCleaningUp)
+		return false;
+
 	if(g_iNumEntities == MAX_ENTITIES)
 		return false;
 
@@ -515,7 +576,10 @@ bool AddEntityForLagCompensation(int iEntity)
 
 public void OnEntitySpawned(int entity, const char[] classname)
 {
-	if(entity < 0 || entity > sizeof(g_bNoPhysics))
+	if(g_bCleaningUp)
+		return;
+
+	if(entity < 0 || entity > sizeof(g_aBlockPhysics))
 		return;
 
 	if(!strncmp(classname, "func_physbox", 12))
@@ -559,7 +623,7 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	if(!AddEntityForLagCompensation(entity))
 		return;
 
-	g_bNoPhysics[entity] = true;
+	g_aBlockPhysics[entity] = 1;
 
 	{
 		char sTargetname[64];
@@ -574,10 +638,11 @@ public void OnEntitySpawned(int entity, const char[] classname)
 
 public void OnEntityDestroyed(int entity)
 {
-	if(entity < 0 || entity > sizeof(g_bNoPhysics))
+	if(g_bCleaningUp)
 		return;
 
-	g_bNoPhysics[entity] = false;
+	if(entity < 0 || entity > sizeof(g_aBlockPhysics))
+		return;
 
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
@@ -591,6 +656,9 @@ public void OnEntityDestroyed(int entity)
 
 void RemoveRecord(int index)
 {
+	if(g_bCleaningUp)
+		return;
+
 	{
 		char sClassname[64];
 		GetEntityClassname(g_aEntityLagData[index].iEntity, sClassname, sizeof(sClassname));
@@ -601,6 +669,16 @@ void RemoveRecord(int index)
 		int iHammerID = GetEntProp(g_aEntityLagData[index].iEntity, Prop_Data, "m_iHammerID");
 
 		PrintToBoth("[%d] RemoveRecord %d / %d (%s)\"%s\"(#%d), num: %d", GetGameTickCount(), index, g_aEntityLagData[index].iEntity, sClassname, sTargetname, iHammerID, g_iNumEntities);
+	}
+
+	g_aBlockPhysics[g_aEntityLagData[index].iEntity] = 0;
+
+	if(g_aEntityLagData[index].iDeleted)
+	{
+		for(int client = 1; client <= MaxClients; client++)
+		{
+			g_aaDeleted[client][g_aEntityLagData[index].iEntity] = 0;
+		}
 	}
 
 	g_aEntityLagData[index].iEntity = -1;
