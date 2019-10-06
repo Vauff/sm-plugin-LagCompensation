@@ -26,6 +26,7 @@ enum struct LagRecord
 {
 	float vecOrigin[3];
 	float vecAngles[3];
+	float flSimulationTime;
 }
 
 enum struct EntityLagData
@@ -37,6 +38,7 @@ enum struct EntityLagData
 	int iDeleted;
 	int iNotMoving;
 	bool bRestore;
+	bool bDoPhysics;
 	LagRecord RestoreData;
 }
 
@@ -48,20 +50,18 @@ bool g_bCleaningUp = false;
 Handle g_hPhysicsTouchTriggers;
 Handle g_hGetAbsOrigin;
 Handle g_hSetAbsOrigin;
-Handle g_hGetAbsAngles;
-Handle g_hSetAbsAngles;
+Handle g_hSetLocalAngles;
 
 Handle g_hPhysicsTouchTriggersDetour;
 Handle g_hUTIL_Remove;
 Handle g_hRestartRound;
 
 bool g_bBlockPhysics = false;
-char g_aBlockPhysics[2048];
+char g_aBlockPhysics[2048] = {0, ...};
 char g_aaDeleted[MAXPLAYERS + 1][2048];
 
 public void OnPluginStart()
 {
-	PrintToServer("MAXPLAYERS = %d / MaxClients = %d", MAXPLAYERS, MaxClients);
 	Handle hGameData = LoadGameConfigFile("LagCompensation.games");
 	if(!hGameData)
 		SetFailState("Failed to load LagCompensation gamedata.");
@@ -96,26 +96,15 @@ public void OnPluginStart()
 	PrepSDKCall_AddParameter(SDKType_Vector, SDKPass_ByRef);
 	g_hSetAbsOrigin = EndPrepSDKCall();
 
-
-	// CBaseEntity::GetAbsAngles
+	// CBaseEntity::SetLocalAngles
 	StartPrepSDKCall(SDKCall_Entity);
-	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "GetAbsAngles"))
+	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "SetLocalAngles"))
 	{
 		delete hGameData;
-		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"GetAbsAngles\") failed!");
+		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"SetLocalAngles\") failed!");
 	}
 	PrepSDKCall_AddParameter(SDKType_QAngle, SDKPass_ByRef);
-	g_hGetAbsAngles = EndPrepSDKCall();
-
-	// CBaseEntity::SetAbsAngles
-	StartPrepSDKCall(SDKCall_Entity);
-	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "SetAbsAngles"))
-	{
-		delete hGameData;
-		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"SetAbsAngles\") failed!");
-	}
-	PrepSDKCall_AddParameter(SDKType_QAngle, SDKPass_ByRef);
-	g_hSetAbsAngles = EndPrepSDKCall();
+	g_hSetLocalAngles = EndPrepSDKCall();
 
 
 	// CBaseEntity::PhysicsTouchTriggers
@@ -161,9 +150,8 @@ public void OnPluginStart()
 	}
 	delete hGameData;
 
-
-	RegAdminCmd("sm_unlag", Command_AddLagCompensation, ADMFLAG_GENERIC, "sm_unlag <entidx>");
-
+	RegAdminCmd("sm_unlag", Command_AddLagCompensation, ADMFLAG_RCON, "sm_unlag <entidx> [trigger 0/1]");
+	RegAdminCmd("sm_lagged", Command_CheckLagCompensated, ADMFLAG_GENERIC, "sm_lagged");
 
 	FilterClientEntityMap(g_aaDeleted, true);
 }
@@ -180,9 +168,74 @@ public Action Command_AddLagCompensation(int client, int argc)
 	GetCmdArg(1, sArgs, sizeof(sArgs));
 
 	int entity = StringToInt(sArgs);
+	int physics = 0;
 
-	AddEntityForLagCompensation(entity);
+	if(argc >= 2)
+	{
+		GetCmdArg(2, sArgs, sizeof(sArgs));
+		physics = StringToInt(sArgs);
+	}
+
+	AddEntityForLagCompensation(entity, view_as<bool>(physics));
 	g_aBlockPhysics[entity] = 1;
+
+	return Plugin_Handled;
+}
+
+public Action Command_CheckLagCompensated(int client, int argc)
+{
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		char sClassname[64];
+		GetEntityClassname(g_aEntityLagData[i].iEntity, sClassname, sizeof(sClassname));
+
+		char sTargetname[64];
+		GetEntPropString(g_aEntityLagData[i].iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+
+		int iHammerID = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "m_iHammerID");
+
+		PrintToConsole(client, "%2d. #%d %s \"%s\" (#%d)", i, g_aEntityLagData[i].iEntity, sClassname, sTargetname, iHammerID);
+	}
+
+	for(int i = 0; i < 2048; i++)
+	{
+		bool bDeleted = false;
+		for(int j = 1; j <= MaxClients; j++)
+		{
+			if(g_aaDeleted[j][i])
+			{
+				bDeleted = true;
+				break;
+			}
+		}
+
+		if(g_aBlockPhysics[i] || bDeleted)
+		{
+			int index = -1;
+			for(int j = 0; j < g_iNumEntities; j++)
+			{
+				if(g_aEntityLagData[j].iEntity == i)
+				{
+					index = j;
+					break;
+				}
+			}
+
+			char sClassname[64] = "INVALID";
+			char sTargetname[64] = "INVALID";
+			int iHammerID = -1;
+
+			if(IsValidEntity(i))
+			{
+				GetEntityClassname(i, sClassname, sizeof(sClassname));
+				GetEntPropString(i, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+				iHammerID = GetEntProp(i, Prop_Data, "m_iHammerID");
+			}
+
+			bool bBlockPhysics = g_aBlockPhysics[i];
+			PrintToConsole(client, "%2d. #%d %s \"%s\" (#%d) -> BlockPhysics: %d / Deleted: %d", index, i, sClassname, sTargetname, iHammerID, bBlockPhysics, bDeleted);
+		}
+	}
 
 	return Plugin_Handled;
 }
@@ -222,9 +275,9 @@ public MRESReturn Detour_OnPhysicsTouchTriggers(int entity, Handle hReturn, Hand
 
 	if(g_aBlockPhysics[entity])
 	{
-		//LogMessage("blocked physics on %d", entity);
 		return MRES_Supercede;
 	}
+
 	return MRES_Ignored;
 }
 
@@ -245,9 +298,9 @@ public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
 		if(!g_aEntityLagData[i].iDeleted)
 		{
 			g_aEntityLagData[i].iDeleted = GetGameTickCount();
+			PrintToBoth("[%d] !!!!!!!!!!! Detour_OnUTIL_Remove: %d / ent: %d", GetGameTickCount(), i, entity);
 		}
 
-		PrintToBoth("[%d] !!!!!!!!!!! Detour_OnUTIL_Remove: %d / ent: %d", GetGameTickCount(), i, entity);
 		return MRES_Supercede;
 	}
 
@@ -273,7 +326,7 @@ public MRESReturn Detour_OnRestartRound()
 				RemoveEdict(g_aEntityLagData[i].iEntity);
 		}
 
-		g_aEntityLagData[i].iEntity = -1;
+		g_aEntityLagData[i].iEntity = INVALID_ENT_REFERENCE;
 	}
 
 	g_iNumEntities = 0;
@@ -316,7 +369,7 @@ public void OnRunThinkFunctions(bool simulating)
 	{
 		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
 		{
-			//PrintToBoth("!!!!!!!!!!! OnRunThinkFunctions SHIT deleted: %d / %d", i, g_aEntityLagData[i].iEntity);
+			PrintToBoth("!!!!!!!!!!! OnRunThinkFunctions SHIT deleted: %d / %d", i, g_aEntityLagData[i].iEntity);
 			RemoveRecord(i);
 			i--; continue;
 		}
@@ -382,7 +435,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		if(iRecordIndex < 0)
 			iRecordIndex += MAX_RECORDS;
 
-		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, client, g_aaLagRecords[i][iRecordIndex]);
+		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, client, g_aEntityLagData[i].bDoPhysics, g_aaLagRecords[i][iRecordIndex]);
 		g_aEntityLagData[i].bRestore = !g_aEntityLagData[i].iDeleted;
 
 #if defined DEBUG
@@ -405,7 +458,7 @@ public void OnPostPlayerThinkFunctions()
 		if(!g_aEntityLagData[i].bRestore)
 			continue;
 
-		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, 0, g_aEntityLagData[i].RestoreData);
+		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, 0, false, g_aEntityLagData[i].RestoreData);
 		g_aEntityLagData[i].bRestore = false;
 
 #if defined DEBUG
@@ -512,27 +565,29 @@ public void OnRunThinkFunctionsPost(bool simulating)
 void RecordDataIntoRecord(int iEntity, LagRecord Record)
 {
 	SDKCall(g_hGetAbsOrigin, iEntity, Record.vecOrigin);
-	SDKCall(g_hGetAbsAngles, iEntity, Record.vecAngles);
+	GetEntPropVector(iEntity, Prop_Data, "m_angRotation", Record.vecAngles);
+	Record.flSimulationTime = GetEntPropFloat(iEntity, Prop_Data, "m_flSimulationTime");
 }
 
-void RestoreEntityFromRecord(int iEntity, int iFilter, LagRecord Record)
+void RestoreEntityFromRecord(int iEntity, int iFilter, bool bDoPhysics, LagRecord Record)
 {
 	FilterTriggerMoved(iFilter);
-	BlockSolidMoved(iEntity);
+	//BlockSolidMoved(iEntity);
 
-	SDKCall(g_hSetAbsAngles, iEntity, Record.vecAngles);
+	SDKCall(g_hSetLocalAngles, iEntity, Record.vecAngles);
 	SDKCall(g_hSetAbsOrigin, iEntity, Record.vecOrigin);
-
-	if(iFilter)
+	SetEntPropFloat(iEntity, Prop_Data, "m_flSimulationTime", Record.flSimulationTime);
+/*
+	if(iFilter && bDoPhysics)
 	{
 		SDKCall(g_hPhysicsTouchTriggers, iEntity, Record.vecOrigin);
 	}
-
-	BlockSolidMoved(-1);
+*/
+	//BlockSolidMoved(-1);
 	FilterTriggerMoved(-1);
 }
 
-bool AddEntityForLagCompensation(int iEntity)
+bool AddEntityForLagCompensation(int iEntity, bool bDoPhysics)
 {
 	if(g_bCleaningUp)
 		return false;
@@ -556,6 +611,7 @@ bool AddEntityForLagCompensation(int iEntity)
 	g_aEntityLagData[i].iDeleted = 0;
 	g_aEntityLagData[i].iNotMoving = MAX_RECORDS;
 	g_aEntityLagData[i].bRestore = false;
+	g_aEntityLagData[i].bDoPhysics = bDoPhysics;
 
 	RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aaLagRecords[i][0]);
 
@@ -582,9 +638,18 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	if(entity < 0 || entity > sizeof(g_aBlockPhysics))
 		return;
 
+	if(!IsValidEntity(entity))
+		return;
+
 	if(!strncmp(classname, "func_physbox", 12))
 	{
-		AddEntityForLagCompensation(entity);
+		int iParent = GetEntPropEnt(iParent, Prop_Data, "m_pParent");
+
+		if(iParent != INVALID_ENT_REFERENCE)
+		{
+			AddEntityForLagCompensation(entity, false);
+		}
+
 		return;
 	}
 
@@ -597,7 +662,7 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	for(;;)
 	{
 		iParent = GetEntPropEnt(iParent, Prop_Data, "m_pParent");
-		if(iParent == -1)
+		if(iParent == INVALID_ENT_REFERENCE)
 			break;
 
 		GetEntityClassname(iParent, sParentClassname, sizeof(sParentClassname));
@@ -614,13 +679,13 @@ public void OnEntitySpawned(int entity, const char[] classname)
 		}
 	}
 
-	if(iParent == -1)
+	if(iParent == INVALID_ENT_REFERENCE)
 		return;
 
 	if(!bGoodParents)
 		return;
 
-	if(!AddEntityForLagCompensation(entity))
+	if(!AddEntityForLagCompensation(entity, true))
 		return;
 
 	g_aBlockPhysics[entity] = 1;
@@ -642,6 +707,9 @@ public void OnEntityDestroyed(int entity)
 		return;
 
 	if(entity < 0 || entity > sizeof(g_aBlockPhysics))
+		return;
+
+	if(!IsValidEntity(entity))
 		return;
 
 	for(int i = 0; i < g_iNumEntities; i++)
@@ -681,14 +749,14 @@ void RemoveRecord(int index)
 		}
 	}
 
-	g_aEntityLagData[index].iEntity = -1;
+	g_aEntityLagData[index].iEntity = INVALID_ENT_REFERENCE;
 
 	for(int src = index + 1; src < g_iNumEntities; src++)
 	{
 		int dest = src - 1;
 
 		EntityLagData_Copy(g_aEntityLagData[dest], g_aEntityLagData[src]);
-		g_aEntityLagData[src].iEntity = -1;
+		g_aEntityLagData[src].iEntity = INVALID_ENT_REFERENCE;
 
 		int iNumRecords = g_aEntityLagData[dest].iNumRecords;
 		for(int i = 0; i < iNumRecords; i++)
@@ -709,6 +777,7 @@ void EntityLagData_Copy(EntityLagData obj, const EntityLagData other)
 	obj.iDeleted = other.iDeleted;
 	obj.iNotMoving = other.iNotMoving;
 	obj.bRestore = other.bRestore;
+	obj.bDoPhysics = other.bDoPhysics;
 	LagRecord_Copy(obj.RestoreData, other.RestoreData);
 }
 
@@ -720,6 +789,7 @@ void LagRecord_Copy(LagRecord obj, const LagRecord other)
 	obj.vecAngles[0] = other.vecAngles[0];
 	obj.vecAngles[1] = other.vecAngles[1];
 	obj.vecAngles[2] = other.vecAngles[2];
+	obj.flSimulationTime = other.flSimulationTime;
 }
 
 

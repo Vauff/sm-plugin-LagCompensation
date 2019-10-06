@@ -48,6 +48,12 @@
                 "library"       "server"
                 "linux"         "@_ZN11CBaseEntity12SetAbsAnglesERK6QAngle"
             }
+
+            "SetLocalAngles"
+            {
+                "library"       "server"
+                "linux"         "@_ZN11CBaseEntity14SetLocalAnglesERK6QAngle"
+            }
         }
 
         "Functions"
