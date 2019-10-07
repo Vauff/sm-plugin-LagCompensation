@@ -37,6 +37,7 @@ enum struct EntityLagData
 	int iRecordsValid;
 	int iDeleted;
 	int iNotMoving;
+	int iTouchStamp;
 	bool bRestore;
 	bool bDoPhysics;
 	LagRecord RestoreData;
@@ -52,11 +53,9 @@ Handle g_hGetAbsOrigin;
 Handle g_hSetAbsOrigin;
 Handle g_hSetLocalAngles;
 
-Handle g_hPhysicsTouchTriggersDetour;
 Handle g_hUTIL_Remove;
 Handle g_hRestartRound;
 
-bool g_bBlockPhysics = false;
 char g_aBlockPhysics[2048] = {0, ...};
 char g_aaDeleted[MAXPLAYERS + 1][2048];
 
@@ -106,20 +105,6 @@ public void OnPluginStart()
 	PrepSDKCall_AddParameter(SDKType_QAngle, SDKPass_ByRef);
 	g_hSetLocalAngles = EndPrepSDKCall();
 
-
-	// CBaseEntity::PhysicsTouchTriggers
-	g_hPhysicsTouchTriggersDetour = DHookCreateFromConf(hGameData, "CBaseEntity__PhysicsTouchTriggers");
-	if(!g_hPhysicsTouchTriggersDetour)
-	{
-		delete hGameData;
-		SetFailState("Failed to setup detour for CBaseEntity__PhysicsTouchTriggers");
-	}
-
-	if(!DHookEnableDetour(g_hPhysicsTouchTriggersDetour, false, Detour_OnPhysicsTouchTriggers))
-	{
-		delete hGameData;
-		SetFailState("Failed to detour CBaseEntity__PhysicsTouchTriggers.");
-	}
 
 	// ::UTIL_Remove
 	g_hUTIL_Remove = DHookCreateFromConf(hGameData, "UTIL_Remove");
@@ -244,6 +229,7 @@ public void OnPluginEnd()
 {
 	g_bCleaningUp = true;
 	FilterClientEntityMap(g_aaDeleted, false);
+	FilterTriggerTouchPlayers(g_aBlockPhysics, false);
 
 	DHookDisableDetour(g_hUTIL_Remove, false, Detour_OnUTIL_Remove);
 
@@ -263,22 +249,6 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 {
 	g_bLateLoad = late;
 	return APLRes_Success;
-}
-
-public MRESReturn Detour_OnPhysicsTouchTriggers(int entity, Handle hReturn, Handle hParams)
-{
-	if(!g_bBlockPhysics)
-		return MRES_Ignored;
-
-	if(entity < 0 || entity > sizeof(g_aBlockPhysics))
-		return MRES_Ignored;
-
-	if(g_aBlockPhysics[entity])
-	{
-		return MRES_Supercede;
-	}
-
-	return MRES_Ignored;
 }
 
 public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
@@ -374,6 +344,21 @@ public void OnRunThinkFunctions(bool simulating)
 			i--; continue;
 		}
 
+		// Save old touchStamp
+		int touchStamp = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "touchStamp");
+		g_aEntityLagData[i].iTouchStamp = touchStamp;
+		// We have to increase the touchStamp by 1 here to avoid breaking the touchlink.
+		// The touchStamp is incremented by 1 every time an entities physics are simulated.
+		// When two entities touch then a touchlink is created on both entities with the touchStamp of either entity.
+		// Usually the player would touch the trigger first and then the trigger would touch the player later on in the same frame.
+		// The trigger touching the player would fix up the touchStamp (which was increased by 1 by the trigger physics simulate)
+		// But since we're blocking the trigger from ever touching a player outside of here we need to manually increase it by 1 up front
+		// so the correct +1'd touchStamp is stored in the touchlink.
+		// After simulating the players we restore the old touchStamp (-1) and when the entity is simulated it will increase it again by 1
+		// Thus both touchlinks will have the correct touchStamp value.
+		touchStamp++;
+		SetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "touchStamp", touchStamp);
+
 		if(g_aEntityLagData[i].iDeleted)
 		{
 			if(g_aEntityLagData[i].iDeleted + MAX_RECORDS < GetGameTickCount())
@@ -455,6 +440,8 @@ public void OnPostPlayerThinkFunctions()
 {
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
+		SetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "touchStamp", g_aEntityLagData[i].iTouchStamp);
+
 		if(!g_aEntityLagData[i].bRestore)
 			continue;
 
@@ -471,7 +458,7 @@ public void OnPostPlayerThinkFunctions()
 #endif
 	}
 
-	g_bBlockPhysics = true;
+	FilterTriggerTouchPlayers(g_aBlockPhysics, true);
 }
 
 public void OnRunThinkFunctionsPost(bool simulating)
@@ -559,7 +546,7 @@ public void OnRunThinkFunctionsPost(bool simulating)
 #endif
 	}
 
-	g_bBlockPhysics = false;
+	FilterTriggerTouchPlayers(g_aBlockPhysics, false);
 }
 
 void RecordDataIntoRecord(int iEntity, LagRecord Record)
@@ -572,7 +559,7 @@ void RecordDataIntoRecord(int iEntity, LagRecord Record)
 void RestoreEntityFromRecord(int iEntity, int iFilter, bool bDoPhysics, LagRecord Record)
 {
 	FilterTriggerMoved(iFilter);
-	//BlockSolidMoved(iEntity);
+	BlockSolidMoved(iEntity);
 
 	SDKCall(g_hSetLocalAngles, iEntity, Record.vecAngles);
 	SDKCall(g_hSetAbsOrigin, iEntity, Record.vecOrigin);
@@ -583,7 +570,7 @@ void RestoreEntityFromRecord(int iEntity, int iFilter, bool bDoPhysics, LagRecor
 		SDKCall(g_hPhysicsTouchTriggers, iEntity, Record.vecOrigin);
 	}
 */
-	//BlockSolidMoved(-1);
+	BlockSolidMoved(-1);
 	FilterTriggerMoved(-1);
 }
 
@@ -643,8 +630,7 @@ public void OnEntitySpawned(int entity, const char[] classname)
 
 	if(!strncmp(classname, "func_physbox", 12))
 	{
-		int iParent = GetEntPropEnt(iParent, Prop_Data, "m_pParent");
-
+		int iParent = GetEntPropEnt(entity, Prop_Data, "m_pParent");
 		if(iParent != INVALID_ENT_REFERENCE)
 		{
 			AddEntityForLagCompensation(entity, false);
@@ -666,6 +652,13 @@ public void OnEntitySpawned(int entity, const char[] classname)
 			break;
 
 		GetEntityClassname(iParent, sParentClassname, sizeof(sParentClassname));
+
+		if(!strncmp(sParentClassname, "prop_physics", 12))
+		{
+			bGoodParents = true;
+			break;
+		}
+
 		if(strncmp(sParentClassname, "func_", 5))
 			continue;
 
@@ -681,7 +674,17 @@ public void OnEntitySpawned(int entity, const char[] classname)
 
 	if(iParent == INVALID_ENT_REFERENCE)
 		return;
+/*
+	{
+		char sTargetname[64];
+		GetEntPropString(entity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
 
+		char sParentTargetname[64];
+		GetEntPropString(iParent, Prop_Data, "m_iName", sParentTargetname, sizeof(sParentTargetname));
+
+		PrintToBoth("CHECKING %s %s | parent: %s %s", classname, sTargetname, sParentClassname, sParentTargetname);
+	}
+*/
 	if(!bGoodParents)
 		return;
 
@@ -776,6 +779,7 @@ void EntityLagData_Copy(EntityLagData obj, const EntityLagData other)
 	obj.iRecordsValid = other.iRecordsValid;
 	obj.iDeleted = other.iDeleted;
 	obj.iNotMoving = other.iNotMoving;
+	obj.iTouchStamp = other.iTouchStamp;
 	obj.bRestore = other.bRestore;
 	obj.bDoPhysics = other.bDoPhysics;
 	LagRecord_Copy(obj.RestoreData, other.RestoreData);
