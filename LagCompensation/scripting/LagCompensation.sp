@@ -627,18 +627,13 @@ public void OnEntitySpawned(int entity, const char[] classname)
 
 	if(!IsValidEntity(entity))
 		return;
-
+/*
 	if(!strncmp(classname, "func_physbox", 12))
 	{
-		int iParent = GetEntPropEnt(entity, Prop_Data, "m_pParent");
-		if(iParent != INVALID_ENT_REFERENCE)
-		{
-			AddEntityForLagCompensation(entity, false);
-		}
-
+		AddEntityForLagCompensation(entity, false);
 		return;
 	}
-
+*/
 	if(!(StrEqual(classname, "trigger_hurt")))
 		return;
 
