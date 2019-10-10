@@ -18,6 +18,9 @@ public Plugin myinfo =
 
 bool g_bLateLoad = false;
 
+// Don't change this.
+#define MAX_EDICTS 2048
+
 #define MAX_RECORDS 32
 #define MAX_ENTITIES 64
 //#define DEBUG
@@ -35,11 +38,11 @@ enum struct EntityLagData
 	int iRecordIndex;
 	int iNumRecords;
 	int iRecordsValid;
+	int iSpawned;
 	int iDeleted;
 	int iNotMoving;
 	int iTouchStamp;
 	bool bRestore;
-	bool bDoPhysics;
 	LagRecord RestoreData;
 }
 
@@ -56,8 +59,8 @@ Handle g_hSetLocalAngles;
 Handle g_hUTIL_Remove;
 Handle g_hRestartRound;
 
-char g_aBlockPhysics[2048] = {0, ...};
-char g_aaDeleted[MAXPLAYERS + 1][2048];
+char g_aBlockTriggerTouch[MAX_EDICTS] = {0, ...};
+char g_aaDeleted[MAXPLAYERS + 1][MAX_EDICTS];
 
 public void OnPluginStart()
 {
@@ -133,9 +136,10 @@ public void OnPluginStart()
 		delete hGameData;
 		SetFailState("Failed to detour CCSGameRules__RestartRound.");
 	}
+
 	delete hGameData;
 
-	RegAdminCmd("sm_unlag", Command_AddLagCompensation, ADMFLAG_RCON, "sm_unlag <entidx> [trigger 0/1]");
+	RegAdminCmd("sm_unlag", Command_AddLagCompensation, ADMFLAG_RCON, "sm_unlag <entidx>");
 	RegAdminCmd("sm_lagged", Command_CheckLagCompensated, ADMFLAG_GENERIC, "sm_lagged");
 
 	FilterClientEntityMap(g_aaDeleted, true);
@@ -153,16 +157,9 @@ public Action Command_AddLagCompensation(int client, int argc)
 	GetCmdArg(1, sArgs, sizeof(sArgs));
 
 	int entity = StringToInt(sArgs);
-	int physics = 0;
 
-	if(argc >= 2)
-	{
-		GetCmdArg(2, sArgs, sizeof(sArgs));
-		physics = StringToInt(sArgs);
-	}
-
-	AddEntityForLagCompensation(entity, view_as<bool>(physics));
-	g_aBlockPhysics[entity] = 1;
+	AddEntityForLagCompensation(entity);
+	g_aBlockTriggerTouch[entity] = 1;
 
 	return Plugin_Handled;
 }
@@ -182,7 +179,7 @@ public Action Command_CheckLagCompensated(int client, int argc)
 		PrintToConsole(client, "%2d. #%d %s \"%s\" (#%d)", i, g_aEntityLagData[i].iEntity, sClassname, sTargetname, iHammerID);
 	}
 
-	for(int i = 0; i < 2048; i++)
+	for(int i = 0; i < MAX_EDICTS; i++)
 	{
 		bool bDeleted = false;
 		for(int j = 1; j <= MaxClients; j++)
@@ -194,7 +191,7 @@ public Action Command_CheckLagCompensated(int client, int argc)
 			}
 		}
 
-		if(g_aBlockPhysics[i] || bDeleted)
+		if(g_aBlockTriggerTouch[i] || bDeleted)
 		{
 			int index = -1;
 			for(int j = 0; j < g_iNumEntities; j++)
@@ -217,7 +214,7 @@ public Action Command_CheckLagCompensated(int client, int argc)
 				iHammerID = GetEntProp(i, Prop_Data, "m_iHammerID");
 			}
 
-			bool bBlockPhysics = g_aBlockPhysics[i];
+			bool bBlockPhysics = g_aBlockTriggerTouch[i];
 			PrintToConsole(client, "%2d. #%d %s \"%s\" (#%d) -> BlockPhysics: %d / Deleted: %d", index, i, sClassname, sTargetname, iHammerID, bBlockPhysics, bDeleted);
 		}
 	}
@@ -229,7 +226,7 @@ public void OnPluginEnd()
 {
 	g_bCleaningUp = true;
 	FilterClientEntityMap(g_aaDeleted, false);
-	FilterTriggerTouchPlayers(g_aBlockPhysics, false);
+	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, false);
 
 	DHookDisableDetour(g_hUTIL_Remove, false, Detour_OnUTIL_Remove);
 
@@ -257,7 +254,7 @@ public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
 		return MRES_Ignored;
 
 	int entity = DHookGetParam(hParams, 1);
-	if(entity < 0 || entity > sizeof(g_aBlockPhysics))
+	if(entity < 0 || entity > MAX_EDICTS)
 		return MRES_Ignored;
 
 	for(int i = 0; i < g_iNumEntities; i++)
@@ -283,7 +280,7 @@ public MRESReturn Detour_OnRestartRound()
 	PrintToBoth("Detour_OnRestartRound with %d entries.", g_iNumEntities);
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
-		g_aBlockPhysics[g_aEntityLagData[i].iEntity] = 0;
+		g_aBlockTriggerTouch[g_aEntityLagData[i].iEntity] = 0;
 
 		if(g_aEntityLagData[i].iDeleted)
 		{
@@ -394,37 +391,46 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	if(!IsPlayerAlive(client))
 		return Plugin_Continue;
 
-	int delta = GetGameTickCount() - tickcount;
-	if(delta < 0)
-		delta = 0;
+	int iDelta = GetGameTickCount() - tickcount;
+	if(iDelta < 0)
+		iDelta = 0;
+
+	if(iDelta > MAX_RECORDS)
+		iDelta = MAX_RECORDS;
+
+	int iPlayerSimTick = GetGameTickCount() + iDelta;
 
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
 		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
 			continue;
 
-		if(delta >= g_aEntityLagData[i].iNumRecords)
-			delta = g_aEntityLagData[i].iNumRecords - 1;
+		// Entity too new, the client couldn't even see it yet.
+		if(g_aEntityLagData[i].iSpawned < iPlayerSimTick)
+			continue;
+
+		if(iDelta >= g_aEntityLagData[i].iNumRecords)
+			iDelta = g_aEntityLagData[i].iNumRecords - 1;
 
 		if(g_aEntityLagData[i].iDeleted)
 		{
-			int simtick = GetGameTickCount() - delta;
-			if(simtick > g_aEntityLagData[i].iDeleted)
+			int iEntitySimTick = GetGameTickCount() - iDelta;
+			if(iEntitySimTick > g_aEntityLagData[i].iDeleted)
 			{
 				g_aaDeleted[client][g_aEntityLagData[i].iEntity] = 1;
 				continue;
 			}
 		}
 
-		int iRecordIndex = g_aEntityLagData[i].iRecordIndex - delta;
+		int iRecordIndex = g_aEntityLagData[i].iRecordIndex - iDelta;
 		if(iRecordIndex < 0)
 			iRecordIndex += MAX_RECORDS;
 
-		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, client, g_aEntityLagData[i].bDoPhysics, g_aaLagRecords[i][iRecordIndex]);
+		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, client, g_aaLagRecords[i][iRecordIndex]);
 		g_aEntityLagData[i].bRestore = !g_aEntityLagData[i].iDeleted;
 
 #if defined DEBUG
-		LogMessage("2 [%d] index %d, Entity %d -> delta = %d | Record = %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, delta, iRecordIndex);
+		LogMessage("2 [%d] index %d, Entity %d -> iDelta = %d | Record = %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, iDelta, iRecordIndex);
 		LogMessage("%f %f %f",
 			g_aaLagRecords[i][iRecordIndex].vecOrigin[0],
 			g_aaLagRecords[i][iRecordIndex].vecOrigin[1],
@@ -445,7 +451,7 @@ public void OnPostPlayerThinkFunctions()
 		if(!g_aEntityLagData[i].bRestore)
 			continue;
 
-		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, 0, false, g_aEntityLagData[i].RestoreData);
+		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, 0, g_aEntityLagData[i].RestoreData);
 		g_aEntityLagData[i].bRestore = false;
 
 #if defined DEBUG
@@ -458,7 +464,7 @@ public void OnPostPlayerThinkFunctions()
 #endif
 	}
 
-	FilterTriggerTouchPlayers(g_aBlockPhysics, true);
+	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, true);
 }
 
 public void OnRunThinkFunctionsPost(bool simulating)
@@ -546,7 +552,7 @@ public void OnRunThinkFunctionsPost(bool simulating)
 #endif
 	}
 
-	FilterTriggerTouchPlayers(g_aBlockPhysics, false);
+	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, false);
 }
 
 void RecordDataIntoRecord(int iEntity, LagRecord Record)
@@ -556,25 +562,20 @@ void RecordDataIntoRecord(int iEntity, LagRecord Record)
 	Record.flSimulationTime = GetEntPropFloat(iEntity, Prop_Data, "m_flSimulationTime");
 }
 
-void RestoreEntityFromRecord(int iEntity, int iFilter, bool bDoPhysics, LagRecord Record)
+void RestoreEntityFromRecord(int iEntity, int iFilter, LagRecord Record)
 {
 	FilterTriggerMoved(iFilter);
-	BlockSolidMoved(iEntity);
+	//BlockSolidMoved(iEntity);
 
 	SDKCall(g_hSetLocalAngles, iEntity, Record.vecAngles);
 	SDKCall(g_hSetAbsOrigin, iEntity, Record.vecOrigin);
 	SetEntPropFloat(iEntity, Prop_Data, "m_flSimulationTime", Record.flSimulationTime);
-/*
-	if(iFilter && bDoPhysics)
-	{
-		SDKCall(g_hPhysicsTouchTriggers, iEntity, Record.vecOrigin);
-	}
-*/
-	BlockSolidMoved(-1);
+
+	//BlockSolidMoved(-1);
 	FilterTriggerMoved(-1);
 }
 
-bool AddEntityForLagCompensation(int iEntity, bool bDoPhysics)
+bool AddEntityForLagCompensation(int iEntity)
 {
 	if(g_bCleaningUp)
 		return false;
@@ -595,10 +596,10 @@ bool AddEntityForLagCompensation(int iEntity, bool bDoPhysics)
 	g_aEntityLagData[i].iRecordIndex = 0;
 	g_aEntityLagData[i].iNumRecords = 1;
 	g_aEntityLagData[i].iRecordsValid = 1;
+	g_aEntityLagData[i].iSpawned = GetGameTickCount();
 	g_aEntityLagData[i].iDeleted = 0;
 	g_aEntityLagData[i].iNotMoving = MAX_RECORDS;
 	g_aEntityLagData[i].bRestore = false;
-	g_aEntityLagData[i].bDoPhysics = bDoPhysics;
 
 	RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aaLagRecords[i][0]);
 
@@ -622,19 +623,19 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	if(g_bCleaningUp)
 		return;
 
-	if(entity < 0 || entity > sizeof(g_aBlockPhysics))
+	if(entity < 0 || entity > MAX_EDICTS)
 		return;
 
 	if(!IsValidEntity(entity))
 		return;
-/*
+
 	if(!strncmp(classname, "func_physbox", 12))
 	{
-		AddEntityForLagCompensation(entity, false);
+		AddEntityForLagCompensation(entity);
 		return;
 	}
-*/
-	if(!(StrEqual(classname, "trigger_hurt")))
+
+	if(!StrEqual(classname, "trigger_hurt"))
 		return;
 
 	int iParent = entity;
@@ -647,12 +648,6 @@ public void OnEntitySpawned(int entity, const char[] classname)
 			break;
 
 		GetEntityClassname(iParent, sParentClassname, sizeof(sParentClassname));
-
-		if(!strncmp(sParentClassname, "prop_physics", 12))
-		{
-			bGoodParents = true;
-			break;
-		}
 
 		if(strncmp(sParentClassname, "func_", 5))
 			continue;
@@ -683,10 +678,10 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	if(!bGoodParents)
 		return;
 
-	if(!AddEntityForLagCompensation(entity, true))
+	if(!AddEntityForLagCompensation(entity))
 		return;
 
-	g_aBlockPhysics[entity] = 1;
+	g_aBlockTriggerTouch[entity] = 1;
 
 	{
 		char sTargetname[64];
@@ -704,7 +699,7 @@ public void OnEntityDestroyed(int entity)
 	if(g_bCleaningUp)
 		return;
 
-	if(entity < 0 || entity > sizeof(g_aBlockPhysics))
+	if(entity < 0 || entity > MAX_EDICTS)
 		return;
 
 	if(!IsValidEntity(entity))
@@ -737,7 +732,7 @@ void RemoveRecord(int index)
 		PrintToBoth("[%d] RemoveRecord %d / %d (%s)\"%s\"(#%d), num: %d", GetGameTickCount(), index, g_aEntityLagData[index].iEntity, sClassname, sTargetname, iHammerID, g_iNumEntities);
 	}
 
-	g_aBlockPhysics[g_aEntityLagData[index].iEntity] = 0;
+	g_aBlockTriggerTouch[g_aEntityLagData[index].iEntity] = 0;
 
 	if(g_aEntityLagData[index].iDeleted)
 	{
@@ -772,11 +767,11 @@ void EntityLagData_Copy(EntityLagData obj, const EntityLagData other)
 	obj.iRecordIndex = other.iRecordIndex;
 	obj.iNumRecords = other.iNumRecords;
 	obj.iRecordsValid = other.iRecordsValid;
+	obj.iSpawned = other.iSpawned;
 	obj.iDeleted = other.iDeleted;
 	obj.iNotMoving = other.iNotMoving;
 	obj.iTouchStamp = other.iTouchStamp;
 	obj.bRestore = other.bRestore;
-	obj.bDoPhysics = other.bDoPhysics;
 	LagRecord_Copy(obj.RestoreData, other.RestoreData);
 }
 

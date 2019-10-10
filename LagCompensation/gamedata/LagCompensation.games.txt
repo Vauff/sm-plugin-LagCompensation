@@ -22,6 +22,12 @@
                 "linux"         "@_ZN12CCSGameRules12RestartRoundEv"
             }
 
+            "CBaseEntity::InvalidatePhysicsRecursive"
+            {
+                "library"       "server"
+                "linux"         "@_ZN11CBaseEntity26InvalidatePhysicsRecursiveEi"
+            }
+
             "GetAbsOrigin"
             {
                 "library"       "server"
@@ -93,6 +99,21 @@
                 "callconv"      "thiscall"
                 "return"        "void"
                 "this"          "ignore"
+            }
+
+            "CBaseEntity__InvalidatePhysicsRecursive"
+            {
+                "signature"     "CBaseEntity::InvalidatePhysicsRecursive"
+                "callconv"      "thiscall"
+                "return"        "void"
+                "this"          "entity"
+                "arguments"
+                {
+                    "nChangeFlags"
+                    {
+                        "type"    "int"
+                    }
+                }
             }
         }
     }
