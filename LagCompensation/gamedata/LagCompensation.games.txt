@@ -4,12 +4,6 @@
     {
         "Signatures"
         {
-            "CBaseEntity::PhysicsTouchTriggers"
-            {
-                "library"       "server"
-                "linux"         "@_ZN11CBaseEntity20PhysicsTouchTriggersEPK6Vector"
-            }
-
             "::UTIL_Remove"
             {
                 "library"       "server"
@@ -20,12 +14,6 @@
             {
                 "library"       "server"
                 "linux"         "@_ZN12CCSGameRules12RestartRoundEv"
-            }
-
-            "CBaseEntity::InvalidatePhysicsRecursive"
-            {
-                "library"       "server"
-                "linux"         "@_ZN11CBaseEntity26InvalidatePhysicsRecursiveEi"
             }
 
             "GetAbsOrigin"
@@ -40,21 +28,6 @@
                 "linux"         "@_ZN11CBaseEntity12SetAbsOriginERK6Vector"
             }
 
-            // CBaseEntity::GetAbsAngles is inlined
-            // so we use CBaseEntity::EyeAngles
-            // which does -> return GetAbsAngles();
-            "GetAbsAngles"
-            {
-                "library"       "server"
-                "linux"         "@_ZN11CBaseEntity9EyeAnglesEv"
-            }
-
-            "SetAbsAngles"
-            {
-                "library"       "server"
-                "linux"         "@_ZN11CBaseEntity12SetAbsAnglesERK6QAngle"
-            }
-
             "SetLocalAngles"
             {
                 "library"       "server"
@@ -64,21 +37,6 @@
 
         "Functions"
         {
-            "CBaseEntity__PhysicsTouchTriggers"
-            {
-                "signature"     "CBaseEntity::PhysicsTouchTriggers"
-                "callconv"      "thiscall"
-                "return"        "void"
-                "this"          "entity"
-                "arguments"
-                {
-                    "pPrevAbsOrigin"
-                    {
-                        "type"    "vectorptr"
-                    }
-                }
-            }
-
             "UTIL_Remove"
             {
                 "signature"     "::UTIL_Remove"
@@ -99,21 +57,6 @@
                 "callconv"      "thiscall"
                 "return"        "void"
                 "this"          "ignore"
-            }
-
-            "CBaseEntity__InvalidatePhysicsRecursive"
-            {
-                "signature"     "CBaseEntity::InvalidatePhysicsRecursive"
-                "callconv"      "thiscall"
-                "return"        "void"
-                "this"          "entity"
-                "arguments"
-                {
-                    "nChangeFlags"
-                    {
-                        "type"    "int"
-                    }
-                }
             }
         }
     }

@@ -12,7 +12,7 @@ public Plugin myinfo =
 	name 			= "LagCompensation",
 	author 			= "BotoX",
 	description 	= "",
-	version 		= "0.0",
+	version 		= "0.1",
 	url 			= ""
 };
 
@@ -51,7 +51,6 @@ EntityLagData g_aEntityLagData[MAX_ENTITIES];
 int g_iNumEntities = 0;
 bool g_bCleaningUp = false;
 
-Handle g_hPhysicsTouchTriggers;
 Handle g_hGetAbsOrigin;
 Handle g_hSetAbsOrigin;
 Handle g_hSetLocalAngles;
@@ -67,16 +66,6 @@ public void OnPluginStart()
 	Handle hGameData = LoadGameConfigFile("LagCompensation.games");
 	if(!hGameData)
 		SetFailState("Failed to load LagCompensation gamedata.");
-
-	// CBaseEntity::PhysicsTouchTriggers
-	StartPrepSDKCall(SDKCall_Entity);
-	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "CBaseEntity::PhysicsTouchTriggers"))
-	{
-		delete hGameData;
-		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"CBaseEntity::PhysicsTouchTriggers\") failed!");
-	}
-	PrepSDKCall_AddParameter(SDKType_Vector, SDKPass_ByRef);
-	g_hPhysicsTouchTriggers = EndPrepSDKCall();
 
 	// CBaseEntity::GetAbsOrigin
 	StartPrepSDKCall(SDKCall_Entity);
@@ -426,7 +415,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		if(iRecordIndex < 0)
 			iRecordIndex += MAX_RECORDS;
 
-		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, client, g_aaLagRecords[i][iRecordIndex]);
+		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, g_aaLagRecords[i][iRecordIndex]);
 		g_aEntityLagData[i].bRestore = !g_aEntityLagData[i].iDeleted;
 
 #if defined DEBUG
@@ -451,7 +440,7 @@ public void OnPostPlayerThinkFunctions()
 		if(!g_aEntityLagData[i].bRestore)
 			continue;
 
-		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, 0, g_aEntityLagData[i].RestoreData);
+		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, g_aEntityLagData[i].RestoreData);
 		g_aEntityLagData[i].bRestore = false;
 
 #if defined DEBUG
@@ -562,17 +551,11 @@ void RecordDataIntoRecord(int iEntity, LagRecord Record)
 	Record.flSimulationTime = GetEntPropFloat(iEntity, Prop_Data, "m_flSimulationTime");
 }
 
-void RestoreEntityFromRecord(int iEntity, int iFilter, LagRecord Record)
+void RestoreEntityFromRecord(int iEntity, LagRecord Record)
 {
-	FilterTriggerMoved(iFilter);
-	//BlockSolidMoved(iEntity);
-
 	SDKCall(g_hSetLocalAngles, iEntity, Record.vecAngles);
 	SDKCall(g_hSetAbsOrigin, iEntity, Record.vecOrigin);
 	SetEntPropFloat(iEntity, Prop_Data, "m_flSimulationTime", Record.flSimulationTime);
-
-	//BlockSolidMoved(-1);
-	FilterTriggerMoved(-1);
 }
 
 bool AddEntityForLagCompensation(int iEntity)
@@ -581,7 +564,18 @@ bool AddEntityForLagCompensation(int iEntity)
 		return false;
 
 	if(g_iNumEntities == MAX_ENTITIES)
+	{
+		char sClassname[64];
+		GetEntityClassname(iEntity, sClassname, sizeof(sClassname));
+
+		char sTargetname[64];
+		GetEntPropString(iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+
+		int iHammerID = GetEntProp(iEntity, Prop_Data, "m_iHammerID");
+
+		PrintToBoth("[%d] OUT OF LAGCOMP SLOTS entity %d (%s)\"%s\"(#%d)", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID);
 		return false;
+	}
 
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
@@ -601,16 +595,16 @@ bool AddEntityForLagCompensation(int iEntity)
 	g_aEntityLagData[i].iNotMoving = MAX_RECORDS;
 	g_aEntityLagData[i].bRestore = false;
 
-	RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aaLagRecords[i][0]);
+	RecordDataIntoRecord(iEntity, g_aaLagRecords[i][0]);
 
 	{
 		char sClassname[64];
-		GetEntityClassname(g_aEntityLagData[i].iEntity, sClassname, sizeof(sClassname));
+		GetEntityClassname(iEntity, sClassname, sizeof(sClassname));
 
 		char sTargetname[64];
-		GetEntPropString(g_aEntityLagData[i].iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+		GetEntPropString(iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
 
-		int iHammerID = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "m_iHammerID");
+		int iHammerID = GetEntProp(iEntity, Prop_Data, "m_iHammerID");
 
 		PrintToBoth("[%d] added entity %d (%s)\"%s\"(#%d) under index %d", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID, i);
 	}
@@ -664,17 +658,7 @@ public void OnEntitySpawned(int entity, const char[] classname)
 
 	if(iParent == INVALID_ENT_REFERENCE)
 		return;
-/*
-	{
-		char sTargetname[64];
-		GetEntPropString(entity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
 
-		char sParentTargetname[64];
-		GetEntPropString(iParent, Prop_Data, "m_iName", sParentTargetname, sizeof(sParentTargetname));
-
-		PrintToBoth("CHECKING %s %s | parent: %s %s", classname, sTargetname, sParentClassname, sParentTargetname);
-	}
-*/
 	if(!bGoodParents)
 		return;
 
@@ -682,16 +666,6 @@ public void OnEntitySpawned(int entity, const char[] classname)
 		return;
 
 	g_aBlockTriggerTouch[entity] = 1;
-
-	{
-		char sTargetname[64];
-		GetEntPropString(entity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
-
-		char sParentTargetname[64];
-		GetEntPropString(iParent, Prop_Data, "m_iName", sParentTargetname, sizeof(sParentTargetname));
-
-		PrintToBoth("added %s %s | parent: %s %s", classname, sTargetname, sParentClassname, sParentTargetname);
-	}
 }
 
 public void OnEntityDestroyed(int entity)
