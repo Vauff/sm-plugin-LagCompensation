@@ -364,7 +364,7 @@ public void OnRunThinkFunctions(bool simulating)
 
 		if(g_aEntityLagData[i].iDeleted)
 		{
-			if(g_aEntityLagData[i].iDeleted + MAX_RECORDS < GetGameTickCount())
+			if(g_aEntityLagData[i].iDeleted + MAX_RECORDS <= GetGameTickCount())
 			{
 				PrintToBoth("[%d] !!!!!!!!!!! RemoveEdict: %d / ent: %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
 				// calls OnEntityDestroyed right away
@@ -413,7 +413,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		int iEntity = g_aEntityLagData[i].iEntity;
 
 		// Entity too new, the client couldn't even see it yet.
-		if(g_aEntityLagData[i].iSpawned < iPlayerSimTick)
+		if(g_aEntityLagData[i].iSpawned > iPlayerSimTick)
 		{
 			g_aaBlockTouch[client][iEntity] = 1;
 			continue;
@@ -423,21 +423,20 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 			g_aaBlockTouch[client][iEntity] = 0;
 		}
 
-		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
-			continue;
-
-		if(iDelta >= g_aEntityLagData[i].iNumRecords)
-			iDelta = g_aEntityLagData[i].iNumRecords - 1;
-
 		if(g_aEntityLagData[i].iDeleted)
 		{
-			int iEntitySimTick = iGameTick - iDelta;
-			if(iEntitySimTick > g_aEntityLagData[i].iDeleted)
+			if(g_aEntityLagData[i].iDeleted <= iPlayerSimTick)
 			{
 				g_aaBlockTouch[client][iEntity] = 1;
 				continue;
 			}
 		}
+
+		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
+			continue;
+
+		if(iDelta >= g_aEntityLagData[i].iNumRecords)
+			iDelta = g_aEntityLagData[i].iNumRecords - 1;
 
 		int iRecordIndex = g_aEntityLagData[i].iRecordIndex - iDelta;
 		if(iRecordIndex < 0)
