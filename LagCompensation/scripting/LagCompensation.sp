@@ -716,7 +716,7 @@ public void OnEntitySpawned(int entity, const char[] classname)
 		GetEntityClassname(iParent, sParentClassname, sizeof(sParentClassname));
 
 		if(StrEqual(sParentClassname, "player") ||
-			strncmp(sParentClassname, "weapon_", 7))
+			!strncmp(sParentClassname, "weapon_", 7))
 		{
 			return;
 		}
