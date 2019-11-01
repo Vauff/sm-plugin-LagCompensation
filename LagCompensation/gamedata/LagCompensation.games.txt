@@ -16,6 +16,12 @@
                 "linux"         "@_ZN12CCSGameRules12RestartRoundEv"
             }
 
+            "CLogicMeasureMovement::SetTarget"
+            {
+                "library"       "server"
+                "linux"         "@_ZN21CLogicMeasureMovement9SetTargetEPKc"
+            }
+
             "GetAbsOrigin"
             {
                 "library"       "server"
@@ -57,6 +63,21 @@
                 "callconv"      "thiscall"
                 "return"        "void"
                 "this"          "ignore"
+            }
+
+            "CLogicMeasureMovement__SetTarget"
+            {
+                "signature"     "CLogicMeasureMovement::SetTarget"
+                "callconv"      "thiscall"
+                "return"        "void"
+                "this"          "entity"
+                "arguments"
+                {
+                    "pName"
+                    {
+                        "type"    "charptr"
+                    }
+                }
             }
         }
     }

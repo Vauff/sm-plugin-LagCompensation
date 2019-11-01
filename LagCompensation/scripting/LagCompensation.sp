@@ -58,6 +58,7 @@ Handle g_hSetLocalAngles;
 
 Handle g_hUTIL_Remove;
 Handle g_hRestartRound;
+Handle g_hSetTarget;
 
 char g_aBlockTriggerTouch[MAX_EDICTS] = {0, ...};
 char g_aaBlockTouch[MAXPLAYERS + 1][MAX_EDICTS];
@@ -125,6 +126,20 @@ public void OnPluginStart()
 	{
 		delete hGameData;
 		SetFailState("Failed to detour CCSGameRules__RestartRound.");
+	}
+
+	// CLogicMeasureMovement::SetTarget
+	g_hSetTarget = DHookCreateFromConf(hGameData, "CLogicMeasureMovement__SetTarget");
+	if(!g_hSetTarget)
+	{
+		delete hGameData;
+		SetFailState("Failed to setup detour for CLogicMeasureMovement__SetTarget");
+	}
+
+	if(!DHookEnableDetour(g_hSetTarget, true, Detour_OnSetTargetPost))
+	{
+		delete hGameData;
+		SetFailState("Failed to detour CLogicMeasureMovement__SetTarget.");
 	}
 
 	delete hGameData;
@@ -304,6 +319,29 @@ public MRESReturn Detour_OnRestartRound()
 	g_iNumEntities = 0;
 
 	g_bCleaningUp = false;
+	return MRES_Ignored;
+}
+
+// https://developer.valvesoftware.com/wiki/Logic_measure_movement
+public MRESReturn Detour_OnSetTargetPost(int pThis, Handle hParams)
+{
+	int entity = GetEntPropEnt(pThis, Prop_Data, "m_hTarget");
+	if(!IsValidEntity(entity))
+		return MRES_Ignored;
+
+	char sClassname[64];
+	if(!GetEntityClassname(entity, sClassname, sizeof(sClassname)))
+		return MRES_Ignored;
+
+	if(!StrEqual(sClassname, "trigger_hurt", false))
+		return MRES_Ignored;
+
+	if(AddEntityForLagCompensation(entity, true))
+	{
+		// Filter the trigger from being touched outside of the lag compensation
+		g_aBlockTriggerTouch[entity] = 1;
+	}
+
 	return MRES_Ignored;
 }
 
@@ -657,50 +695,49 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	if(!IsValidEntity(entity))
 		return;
 
-	if(!strncmp(classname, "func_physbox", 12))
+	bool bTriggerHurt = StrEqual(classname, "trigger_hurt");
+	bool bPhysBox = !strncmp(classname, "func_physbox", 12);
+
+	if(!bTriggerHurt && !bPhysBox)
+		return;
+
+	// Don't lag compensate anything that could be parented to a player
+	// The player simulation would usually move the entity,
+	// but we would overwrite that position change by restoring the entity to its previous state.
+	int iParent = INVALID_ENT_REFERENCE;
+	char sParentClassname[64];
+	for(int iTmp = entity;;)
+	{
+		iTmp = GetEntPropEnt(iTmp, Prop_Data, "m_pParent");
+		if(iTmp == INVALID_ENT_REFERENCE)
+			break;
+
+		iParent = iTmp;
+		GetEntityClassname(iParent, sParentClassname, sizeof(sParentClassname));
+
+		if(StrEqual(sParentClassname, "player") ||
+			strncmp(sParentClassname, "weapon_", 7))
+		{
+			return;
+		}
+	}
+
+	// Lag compensate all physboxes
+	if(bPhysBox)
 	{
 		AddEntityForLagCompensation(entity, false);
 		return;
 	}
 
-	if(!StrEqual(classname, "trigger_hurt"))
-		return;
-
-	int iParent = entity;
-	char sParentClassname[64];
-	bool bGoodParents = false;
-	for(;;)
+	// Lag compensate all (non player-) parented hurt triggers
+	if(bTriggerHurt && iParent > MaxClients && iParent < MAX_EDICTS)
 	{
-		iParent = GetEntPropEnt(iParent, Prop_Data, "m_pParent");
-		if(iParent == INVALID_ENT_REFERENCE)
-			break;
-
-		GetEntityClassname(iParent, sParentClassname, sizeof(sParentClassname));
-
-		if(strncmp(sParentClassname, "func_", 5))
-			continue;
-
-		if(StrEqual(sParentClassname[5], "movelinear") ||
-			StrEqual(sParentClassname[5], "door") ||
-			StrEqual(sParentClassname[5], "rotating") ||
-			StrEqual(sParentClassname[5], "tracktrain") ||
-			!strncmp(sParentClassname[5], "physbox", 7))
+		if(AddEntityForLagCompensation(entity, true))
 		{
-			bGoodParents = true;
-			break;
+			// Filter the trigger from being touched outside of the lag compensation
+			g_aBlockTriggerTouch[entity] = 1;
 		}
 	}
-
-	if(iParent == INVALID_ENT_REFERENCE)
-		return;
-
-	if(!bGoodParents)
-		return;
-
-	if(!AddEntityForLagCompensation(entity, true))
-		return;
-
-	g_aBlockTriggerTouch[entity] = 1;
 }
 
 public void OnEntityDestroyed(int entity)
