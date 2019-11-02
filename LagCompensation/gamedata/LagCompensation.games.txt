@@ -79,6 +79,21 @@
                     }
                 }
             }
+
+            "CLogicMeasureMovement__SetTarget_post"
+            {
+                "signature"     "CLogicMeasureMovement::SetTarget"
+                "callconv"      "thiscall"
+                "return"        "void"
+                "this"          "ignore"
+                "arguments"
+                {
+                    "pName"
+                    {
+                        "type"    "charptr"
+                    }
+                }
+            }
         }
     }
 }

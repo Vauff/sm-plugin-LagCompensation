@@ -59,6 +59,7 @@ Handle g_hSetLocalAngles;
 Handle g_hUTIL_Remove;
 Handle g_hRestartRound;
 Handle g_hSetTarget;
+Handle g_hSetTargetPost;
 
 char g_aBlockTriggerTouch[MAX_EDICTS] = {0, ...};
 char g_aaBlockTouch[MAXPLAYERS + 1][MAX_EDICTS];
@@ -136,10 +137,24 @@ public void OnPluginStart()
 		SetFailState("Failed to setup detour for CLogicMeasureMovement__SetTarget");
 	}
 
-	if(!DHookEnableDetour(g_hSetTarget, true, Detour_OnSetTargetPost))
+	if(!DHookEnableDetour(g_hSetTarget, false, Detour_OnSetTargetPre))
 	{
 		delete hGameData;
 		SetFailState("Failed to detour CLogicMeasureMovement__SetTarget.");
+	}
+
+	// CLogicMeasureMovement::SetTarget (fix post hook crashing due to this pointer being overwritten)
+	g_hSetTargetPost = DHookCreateFromConf(hGameData, "CLogicMeasureMovement__SetTarget_post");
+	if(!g_hSetTargetPost)
+	{
+		delete hGameData;
+		SetFailState("Failed to setup detour for CLogicMeasureMovement__SetTarget_post");
+	}
+
+	if(!DHookEnableDetour(g_hSetTargetPost, true, Detour_OnSetTargetPost))
+	{
+		delete hGameData;
+		SetFailState("Failed to detour CLogicMeasureMovement__SetTarget_post.");
 	}
 
 	delete hGameData;
@@ -323,9 +338,15 @@ public MRESReturn Detour_OnRestartRound()
 }
 
 // https://developer.valvesoftware.com/wiki/Logic_measure_movement
-public MRESReturn Detour_OnSetTargetPost(int pThis, Handle hParams)
+int g_OnSetTarget_pThis;
+public MRESReturn Detour_OnSetTargetPre(int pThis, Handle hParams)
 {
-	int entity = GetEntPropEnt(pThis, Prop_Data, "m_hTarget");
+	g_OnSetTarget_pThis = pThis;
+	return MRES_Ignored;
+}
+public MRESReturn Detour_OnSetTargetPost(Handle hParams)
+{
+	int entity = GetEntPropEnt(g_OnSetTarget_pThis, Prop_Data, "m_hTarget");
 	if(!IsValidEntity(entity))
 		return MRES_Ignored;
 
