@@ -465,7 +465,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	if(iDelta > MAX_RECORDS)
 		iDelta = MAX_RECORDS;
 
-	int iPlayerSimTick = iGameTick + iDelta;
+	int iPlayerSimTick = iGameTick - iDelta;
 
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
@@ -497,7 +497,10 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		if(iDelta >= g_aEntityLagData[i].iNumRecords)
 			iDelta = g_aEntityLagData[i].iNumRecords - 1;
 
-		int iRecordIndex = g_aEntityLagData[i].iRecordIndex - iDelta;
+		// +1 because the newest record in the list is one tick old
+		// this is because we simulate players first
+		// hence no new entity record was inserted on the current tick
+		int iRecordIndex = g_aEntityLagData[i].iRecordIndex - iDelta + 1;
 		if(iRecordIndex < 0)
 			iRecordIndex += MAX_RECORDS;
 
