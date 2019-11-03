@@ -494,13 +494,14 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
 			continue;
 
-		if(iDelta >= g_aEntityLagData[i].iNumRecords)
-			iDelta = g_aEntityLagData[i].iNumRecords - 1;
-
 		// +1 because the newest record in the list is one tick old
 		// this is because we simulate players first
 		// hence no new entity record was inserted on the current tick
-		int iRecordIndex = g_aEntityLagData[i].iRecordIndex - iDelta + 1;
+		iDelta += 1;
+		if(iDelta >= g_aEntityLagData[i].iNumRecords)
+			iDelta = g_aEntityLagData[i].iNumRecords - 1;
+
+		int iRecordIndex = g_aEntityLagData[i].iRecordIndex - iDelta;
 		if(iRecordIndex < 0)
 			iRecordIndex += MAX_RECORDS;
 
