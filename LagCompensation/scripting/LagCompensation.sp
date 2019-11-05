@@ -354,8 +354,12 @@ public MRESReturn Detour_OnSetTargetPost(Handle hParams)
 	if(!GetEntityClassname(entity, sClassname, sizeof(sClassname)))
 		return MRES_Ignored;
 
-	if(!StrEqual(sClassname, "trigger_hurt", false))
+	if(!(StrEqual(sClassname, "trigger_hurt", false) ||
+		StrEqual(sClassname, "trigger_push", false) ||
+		StrEqual(sClassname, "trigger_teleport", false)))
+	{
 		return MRES_Ignored;
+	}
 
 	if(AddEntityForLagCompensation(entity, true))
 	{
@@ -720,10 +724,16 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	if(!IsValidEntity(entity))
 		return;
 
-	bool bTriggerHurt = StrEqual(classname, "trigger_hurt");
-	bool bPhysBox = !strncmp(classname, "func_physbox", 12);
+	bool bTrigger = StrEqual(classname, "trigger_hurt", false) ||
+					StrEqual(classname, "trigger_push", false) ||
+					StrEqual(classname, "trigger_teleport", false);
 
-	if(!bTriggerHurt && !bPhysBox)
+	bool bMoving =	!strncmp(classname, "func_physbox", 12, false);/* ||
+					StrEqual(classname, "func_movelinear", false) ||
+					StrEqual(classname, "func_door", false) ||
+					StrEqual(classname, "func_tracktrain", false);*/
+
+	if(!bTrigger && !bMoving)
 		return;
 
 	// Don't lag compensate anything that could be parented to a player
@@ -747,15 +757,15 @@ public void OnEntitySpawned(int entity, const char[] classname)
 		}
 	}
 
-	// Lag compensate all physboxes
-	if(bPhysBox)
+	// Lag compensate all moving stuff
+	if(bMoving)
 	{
 		AddEntityForLagCompensation(entity, false);
 		return;
 	}
 
 	// Lag compensate all (non player-) parented hurt triggers
-	if(bTriggerHurt && iParent > MaxClients && iParent < MAX_EDICTS)
+	if(bTrigger && iParent > MaxClients && iParent < MAX_EDICTS)
 	{
 		if(AddEntityForLagCompensation(entity, true))
 		{
