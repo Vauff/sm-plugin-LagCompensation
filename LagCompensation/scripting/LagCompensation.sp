@@ -510,7 +510,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 			iRecordIndex += MAX_RECORDS;
 
 		RestoreEntityFromRecord(iEntity, g_aaLagRecords[i][iRecordIndex]);
-		g_aEntityLagData[i].bRestore = !g_aEntityLagData[i].iDeleted;
+		g_aEntityLagData[i].bRestore |= !g_aEntityLagData[i].iDeleted;
 
 #if defined DEBUG
 		LogMessage("2 [%d] index %d, Entity %d -> iDelta = %d | Record = %d", iGameTick, i, iEntity, iDelta, iRecordIndex);
@@ -576,9 +576,8 @@ public void OnRunThinkFunctionsPost(bool simulating)
 		{
 			int iOldRecord = g_aEntityLagData[i].iRecordIndex;
 
-			if(g_aaLagRecords[i][iOldRecord].vecOrigin[0] == TmpRecord.vecOrigin[0] &&
-				g_aaLagRecords[i][iOldRecord].vecOrigin[1] == TmpRecord.vecOrigin[1] &&
-				g_aaLagRecords[i][iOldRecord].vecOrigin[2] == TmpRecord.vecOrigin[2])
+			if(CompareVectors(g_aaLagRecords[i][iOldRecord].vecOrigin, TmpRecord.vecOrigin) &&
+				CompareVectors(g_aaLagRecords[i][iOldRecord].vecAngles, TmpRecord.vecAngles))
 			{
 				g_aEntityLagData[i].iNotMoving++;
 
@@ -728,10 +727,7 @@ public void OnEntitySpawned(int entity, const char[] classname)
 					StrEqual(classname, "trigger_push", false) ||
 					StrEqual(classname, "trigger_teleport", false);
 
-	bool bMoving =	!strncmp(classname, "func_physbox", 12, false);/* ||
-					StrEqual(classname, "func_movelinear", false) ||
-					StrEqual(classname, "func_door", false) ||
-					StrEqual(classname, "func_tracktrain", false);*/
+	bool bMoving = !strncmp(classname, "func_physbox", 12, false);
 
 	if(!bTrigger && !bMoving)
 		return;
@@ -865,6 +861,10 @@ void LagRecord_Copy(LagRecord obj, const LagRecord other)
 	obj.flSimulationTime = other.flSimulationTime;
 }
 
+bool CompareVectors(const float vec1[3], const float vec2[3])
+{
+	return vec1[0] == vec2[0] && vec1[1] == vec2[1] && vec1[2] == vec2[2];
+}
 
 stock void PrintToBoth(const char[] format, any ...)
 {
