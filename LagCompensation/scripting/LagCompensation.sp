@@ -12,7 +12,7 @@ public Plugin myinfo =
 	name 			= "LagCompensation",
 	author 			= "BotoX",
 	description 	= "",
-	version 		= "0.1",
+	version 		= "0.2",
 	url 			= ""
 };
 
@@ -20,6 +20,32 @@ bool g_bLateLoad = false;
 
 // Don't change this.
 #define MAX_EDICTS 2048
+#define FSOLID_FORCE_WORLD_ALIGNED 0x0040
+#define FSOLID_ROOT_PARENT_ALIGNED 0x0100
+#define EFL_DIRTY_SURROUNDING_COLLISION_BOUNDS (1<<14)
+
+enum
+{
+	USE_OBB_COLLISION_BOUNDS = 0,
+	USE_BEST_COLLISION_BOUNDS,
+	USE_HITBOXES,
+	USE_SPECIFIED_BOUNDS,
+	USE_GAME_CODE,
+	USE_ROTATION_EXPANDED_BOUNDS,
+	USE_COLLISION_BOUNDS_NEVER_VPHYSICS,
+}
+
+enum
+{
+	SOLID_NONE			= 0,	// no solid model
+	SOLID_BSP			= 1,	// a BSP tree
+	SOLID_BBOX			= 2,	// an AABB
+	SOLID_OBB			= 3,	// an OBB (not implemented yet)
+	SOLID_OBB_YAW		= 4,	// an OBB, constrained so that it can only yaw
+	SOLID_CUSTOM		= 5,	// Always call into the entity for tests
+	SOLID_VPHYSICS		= 6,	// solid vphysics object, get vcollide from the model and collide with that
+	SOLID_LAST,
+};
 
 #define MAX_RECORDS 32
 #define MAX_ENTITIES 128
@@ -28,8 +54,11 @@ bool g_bLateLoad = false;
 enum struct LagRecord
 {
 	float vecOrigin[3];
-	float vecAngles[3];
+	float vecAbsOrigin[3];
+	float angRotation[3];
+	float angAbsRotation[3];
 	float flSimulationTime;
+	float rgflCoordinateFrame[14];
 }
 
 enum struct EntityLagData
@@ -50,16 +79,27 @@ enum struct EntityLagData
 LagRecord g_aaLagRecords[MAX_ENTITIES][MAX_RECORDS];
 EntityLagData g_aEntityLagData[MAX_ENTITIES];
 int g_iNumEntities = 0;
-bool g_bCleaningUp = false;
+bool g_bCleaningUp = true;
 
-Handle g_hGetAbsOrigin;
-Handle g_hSetAbsOrigin;
-Handle g_hSetLocalAngles;
+Handle g_hCalcAbsolutePosition;
+Handle g_hMarkPartitionHandleDirty;
 
 Handle g_hUTIL_Remove;
 Handle g_hRestartRound;
 Handle g_hSetTarget;
 Handle g_hSetTargetPost;
+
+int g_iCollision;
+int g_iSolidFlags;
+int g_iSolidType;
+int g_iSurroundType;
+int g_iEFlags;
+int g_iVecOrigin;
+int g_iVecAbsOrigin;
+int g_iAngRotation;
+int g_iAngAbsRotation;
+int g_iSimulationTime;
+int g_iCoordinateFrame;
 
 char g_aBlockTriggerTouch[MAX_EDICTS] = {0, ...};
 char g_aaBlockTouch[MAXPLAYERS + 1][MAX_EDICTS];
@@ -70,35 +110,23 @@ public void OnPluginStart()
 	if(!hGameData)
 		SetFailState("Failed to load LagCompensation gamedata.");
 
-	// CBaseEntity::GetAbsOrigin
+	// CBaseEntity::CalcAbsolutePosition
 	StartPrepSDKCall(SDKCall_Entity);
-	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "GetAbsOrigin"))
+	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "CalcAbsolutePosition"))
 	{
 		delete hGameData;
-		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"GetAbsOrigin\") failed!");
+		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"CalcAbsolutePosition\") failed!");
 	}
-	PrepSDKCall_SetReturnInfo(SDKType_Vector, SDKPass_ByRef);
-	g_hGetAbsOrigin = EndPrepSDKCall();
+	g_hCalcAbsolutePosition = EndPrepSDKCall();
 
-	// CBaseEntity::SetAbsOrigin
-	StartPrepSDKCall(SDKCall_Entity);
-	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "SetAbsOrigin"))
+	// CCollisionProperty::MarkPartitionHandleDirty
+	StartPrepSDKCall(SDKCall_Raw);
+	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "MarkPartitionHandleDirty"))
 	{
 		delete hGameData;
-		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"SetAbsOrigin\") failed!");
+		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"MarkPartitionHandleDirty\") failed!");
 	}
-	PrepSDKCall_AddParameter(SDKType_Vector, SDKPass_ByRef);
-	g_hSetAbsOrigin = EndPrepSDKCall();
-
-	// CBaseEntity::SetLocalAngles
-	StartPrepSDKCall(SDKCall_Entity);
-	if(!PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "SetLocalAngles"))
-	{
-		delete hGameData;
-		SetFailState("PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, \"SetLocalAngles\") failed!");
-	}
-	PrepSDKCall_AddParameter(SDKType_QAngle, SDKPass_ByRef);
-	g_hSetLocalAngles = EndPrepSDKCall();
+	g_hMarkPartitionHandleDirty = EndPrepSDKCall();
 
 
 	// ::UTIL_Remove
@@ -375,15 +403,24 @@ public void OnMapStart()
 	bool bLate = g_bLateLoad;
 	g_bLateLoad = false;
 
+	g_bCleaningUp = false;
+
+	g_iCollision = FindDataMapInfo(0, "m_Collision");
+	g_iSolidFlags = FindDataMapInfo(0, "m_usSolidFlags");
+	g_iSolidType = FindDataMapInfo(0, "m_nSolidType");
+	g_iSurroundType = FindDataMapInfo(0, "m_nSurroundType");
+	g_iEFlags = FindDataMapInfo(0, "m_iEFlags");
+
+	g_iVecOrigin = FindDataMapInfo(0, "m_vecOrigin");
+	g_iVecAbsOrigin = FindDataMapInfo(0, "m_vecAbsOrigin");
+	g_iAngRotation = FindDataMapInfo(0, "m_angRotation");
+	g_iAngAbsRotation = FindDataMapInfo(0, "m_angAbsRotation");
+	g_iSimulationTime = FindDataMapInfo(0, "m_flSimulationTime");
+	g_iCoordinateFrame = FindDataMapInfo(0, "m_rgflCoordinateFrame");
+
 	/* Late Load */
 	if(bLate)
 	{
-		for(int client = 1; client <= MaxClients; client++)
-		{
-			if(IsClientInGame(client))
-				OnClientPutInServer(client);
-		}
-
 		int entity = INVALID_ENT_REFERENCE;
 		while((entity = FindEntityByClassname(entity, "*")) != INVALID_ENT_REFERENCE)
 		{
@@ -392,10 +429,6 @@ public void OnMapStart()
 				OnEntitySpawned(entity, sClassname);
 		}
 	}
-}
-
-public void OnClientPutInServer(int client)
-{
 }
 
 public void OnRunThinkFunctions(bool simulating)
@@ -576,8 +609,8 @@ public void OnRunThinkFunctionsPost(bool simulating)
 		{
 			int iOldRecord = g_aEntityLagData[i].iRecordIndex;
 
-			if(CompareVectors(g_aaLagRecords[i][iOldRecord].vecOrigin, TmpRecord.vecOrigin) &&
-				CompareVectors(g_aaLagRecords[i][iOldRecord].vecAngles, TmpRecord.vecAngles))
+			if(CompareVectors(g_aaLagRecords[i][iOldRecord].vecAbsOrigin, TmpRecord.vecAbsOrigin) &&
+				CompareVectors(g_aaLagRecords[i][iOldRecord].angRotation, TmpRecord.angAbsRotation))
 			{
 				g_aEntityLagData[i].iNotMoving++;
 
@@ -645,16 +678,77 @@ public void OnRunThinkFunctionsPost(bool simulating)
 
 void RecordDataIntoRecord(int iEntity, LagRecord Record)
 {
-	SDKCall(g_hGetAbsOrigin, iEntity, Record.vecOrigin);
-	GetEntPropVector(iEntity, Prop_Data, "m_angRotation", Record.vecAngles);
-	Record.flSimulationTime = GetEntPropFloat(iEntity, Prop_Data, "m_flSimulationTime");
+	SDKCall(g_hCalcAbsolutePosition, iEntity);
+	GetEntDataVector(iEntity, g_iVecOrigin, Record.vecOrigin);
+	GetEntDataVector(iEntity, g_iVecAbsOrigin, Record.vecAbsOrigin);
+	GetEntDataVector(iEntity, g_iAngRotation, Record.angRotation);
+	GetEntDataVector(iEntity, g_iAngAbsRotation, Record.angAbsRotation);
+	GetEntDataArray(iEntity, g_iCoordinateFrame, Record.rgflCoordinateFrame, 14, 4);
+	Record.flSimulationTime = GetEntDataFloat(iEntity, g_iSimulationTime);
+}
+
+bool DoesRotationInvalidateSurroundingBox(int iEntity)
+{
+	int SolidFlags = GetEntData(iEntity, g_iSolidFlags);
+	if(SolidFlags & FSOLID_ROOT_PARENT_ALIGNED)
+		return true;
+
+	int SurroundType = GetEntData(iEntity, g_iSurroundType);
+	switch(SurroundType)
+	{
+		case USE_COLLISION_BOUNDS_NEVER_VPHYSICS,
+			 USE_OBB_COLLISION_BOUNDS,
+			 USE_BEST_COLLISION_BOUNDS:
+		{
+			// IsBoundsDefinedInEntitySpace()
+			int SolidType = GetEntData(iEntity, g_iSolidType);
+			return ((SolidFlags & FSOLID_FORCE_WORLD_ALIGNED) == 0) &&
+					(SolidType != SOLID_BBOX) && (SolidType != SOLID_NONE);
+		}
+
+		case USE_HITBOXES,
+			 USE_GAME_CODE:
+		{
+			return true;
+		}
+
+		case USE_ROTATION_EXPANDED_BOUNDS,
+			 USE_SPECIFIED_BOUNDS:
+		{
+			return false;
+		}
+
+		default:
+		{
+			return true;
+		}
+	}
 }
 
 void RestoreEntityFromRecord(int iEntity, LagRecord Record)
 {
-	SDKCall(g_hSetLocalAngles, iEntity, Record.vecAngles);
-	SDKCall(g_hSetAbsOrigin, iEntity, Record.vecOrigin);
-	SetEntPropFloat(iEntity, Prop_Data, "m_flSimulationTime", Record.flSimulationTime);
+	SetEntDataVector(iEntity, g_iVecOrigin, Record.vecOrigin);
+	SetEntDataVector(iEntity, g_iVecAbsOrigin, Record.vecAbsOrigin);
+	SetEntDataVector(iEntity, g_iAngRotation, Record.angRotation);
+	SetEntDataVector(iEntity, g_iAngAbsRotation, Record.angAbsRotation);
+	SetEntDataFloat(iEntity, g_iSimulationTime, Record.flSimulationTime);
+	SetEntDataArray(iEntity, g_iCoordinateFrame, Record.rgflCoordinateFrame, 14, 4);
+
+	// NetworkProp()->MarkPVSInformationDirty()
+	int fStateFlags = GetEdictFlags(iEntity);
+	fStateFlags |= FL_EDICT_DIRTY_PVS_INFORMATION;
+	SetEdictFlags(iEntity, fStateFlags);
+
+	// CollisionProp()->MarkPartitionHandleDirty();
+	int CollisionProp = GetEntData(iEntity, g_iCollision);
+	SDKCall(g_hMarkPartitionHandleDirty, CollisionProp);
+
+	if(DoesRotationInvalidateSurroundingBox(iEntity))
+	{
+		int EFlags = GetEntData(iEntity, g_iEFlags);
+		EFlags |= EFL_DIRTY_SURROUNDING_COLLISION_BOUNDS;
+		SetEntData(iEntity, g_iEFlags, EFlags);
+	}
 }
 
 bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
@@ -694,6 +788,7 @@ bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
 	g_aEntityLagData[i].iNotMoving = MAX_RECORDS;
 	g_aEntityLagData[i].bRestore = false;
 	g_aEntityLagData[i].bLateKill = bLateKill;
+	g_aEntityLagData[i].iTouchStamp = GetEntProp(iEntity, Prop_Data, "touchStamp");
 
 	RecordDataIntoRecord(iEntity, g_aaLagRecords[i][0]);
 
@@ -725,7 +820,8 @@ public void OnEntitySpawned(int entity, const char[] classname)
 
 	bool bTrigger = StrEqual(classname, "trigger_hurt", false) ||
 					StrEqual(classname, "trigger_push", false) ||
-					StrEqual(classname, "trigger_teleport", false);
+					StrEqual(classname, "trigger_teleport", false) ||
+					StrEqual(classname, "trigger_multiple", false);
 
 	bool bMoving = !strncmp(classname, "func_physbox", 12, false);
 
@@ -855,10 +951,31 @@ void LagRecord_Copy(LagRecord obj, const LagRecord other)
 	obj.vecOrigin[0] = other.vecOrigin[0];
 	obj.vecOrigin[1] = other.vecOrigin[1];
 	obj.vecOrigin[2] = other.vecOrigin[2];
-	obj.vecAngles[0] = other.vecAngles[0];
-	obj.vecAngles[1] = other.vecAngles[1];
-	obj.vecAngles[2] = other.vecAngles[2];
+	obj.vecAbsOrigin[0] = other.vecAbsOrigin[0];
+	obj.vecAbsOrigin[1] = other.vecAbsOrigin[1];
+	obj.vecAbsOrigin[2] = other.vecAbsOrigin[2];
+	obj.angRotation[0] = other.angRotation[0];
+	obj.angRotation[1] = other.angRotation[1];
+	obj.angRotation[2] = other.angRotation[2];
+	obj.angAbsRotation[0] = other.angAbsRotation[0];
+	obj.angAbsRotation[1] = other.angAbsRotation[1];
+	obj.angAbsRotation[2] = other.angAbsRotation[2];
 	obj.flSimulationTime = other.flSimulationTime;
+
+	obj.rgflCoordinateFrame[0] = other.rgflCoordinateFrame[0];
+	obj.rgflCoordinateFrame[1] = other.rgflCoordinateFrame[1];
+	obj.rgflCoordinateFrame[2] = other.rgflCoordinateFrame[2];
+	obj.rgflCoordinateFrame[3] = other.rgflCoordinateFrame[3];
+	obj.rgflCoordinateFrame[4] = other.rgflCoordinateFrame[4];
+	obj.rgflCoordinateFrame[5] = other.rgflCoordinateFrame[5];
+	obj.rgflCoordinateFrame[6] = other.rgflCoordinateFrame[6];
+	obj.rgflCoordinateFrame[7] = other.rgflCoordinateFrame[7];
+	obj.rgflCoordinateFrame[8] = other.rgflCoordinateFrame[8];
+	obj.rgflCoordinateFrame[9] = other.rgflCoordinateFrame[9];
+	obj.rgflCoordinateFrame[10] = other.rgflCoordinateFrame[10];
+	obj.rgflCoordinateFrame[11] = other.rgflCoordinateFrame[11];
+	obj.rgflCoordinateFrame[12] = other.rgflCoordinateFrame[12];
+	obj.rgflCoordinateFrame[13] = other.rgflCoordinateFrame[13];
 }
 
 bool CompareVectors(const float vec1[3], const float vec2[3])
