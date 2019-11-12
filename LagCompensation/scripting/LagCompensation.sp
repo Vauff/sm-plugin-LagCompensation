@@ -22,7 +22,9 @@ bool g_bLateLoad = false;
 #define MAX_EDICTS 2048
 #define FSOLID_FORCE_WORLD_ALIGNED 0x0040
 #define FSOLID_ROOT_PARENT_ALIGNED 0x0100
+#define EFL_DIRTY_ABSTRANSFORM (1<<11)
 #define EFL_DIRTY_SURROUNDING_COLLISION_BOUNDS (1<<14)
+#define EFL_CHECK_UNTOUCH (1<<24)
 
 enum
 {
@@ -89,6 +91,7 @@ Handle g_hRestartRound;
 Handle g_hSetTarget;
 Handle g_hSetTargetPost;
 
+int g_iTouchStamp;
 int g_iCollision;
 int g_iSolidFlags;
 int g_iSolidType;
@@ -405,6 +408,7 @@ public void OnMapStart()
 
 	g_bCleaningUp = false;
 
+	g_iTouchStamp = FindDataMapInfo(0, "touchStamp");
 	g_iCollision = FindDataMapInfo(0, "m_Collision");
 	g_iSolidFlags = FindDataMapInfo(0, "m_usSolidFlags");
 	g_iSolidType = FindDataMapInfo(0, "m_nSolidType");
@@ -443,7 +447,7 @@ public void OnRunThinkFunctions(bool simulating)
 		}
 
 		// Save old touchStamp
-		int touchStamp = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "touchStamp");
+		int touchStamp = GetEntData(g_aEntityLagData[i].iEntity, g_iTouchStamp);
 		g_aEntityLagData[i].iTouchStamp = touchStamp;
 		// We have to increase the touchStamp by 1 here to avoid breaking the touchlink.
 		// The touchStamp is incremented by 1 every time an entities physics are simulated.
@@ -456,7 +460,7 @@ public void OnRunThinkFunctions(bool simulating)
 		// Thus both touchlinks will have the correct touchStamp value.
 		// The touchStamp doesn't increase when the entity is idle, however it also doesn't check untouch so we're fine.
 		touchStamp++;
-		SetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "touchStamp", touchStamp);
+		SetEntData(g_aEntityLagData[i].iEntity, g_iTouchStamp, touchStamp);
 
 		if(g_aEntityLagData[i].iDeleted)
 		{
@@ -562,7 +566,7 @@ public void OnPostPlayerThinkFunctions()
 {
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
-		SetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "touchStamp", g_aEntityLagData[i].iTouchStamp);
+		SetEntData(g_aEntityLagData[i].iEntity, g_iTouchStamp, g_aEntityLagData[i].iTouchStamp);
 
 		if(!g_aEntityLagData[i].bRestore)
 			continue;
@@ -587,6 +591,14 @@ public void OnRunThinkFunctionsPost(bool simulating)
 {
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
+		// Don't make the entity check untouch in FrameUpdatePostEntityThink.
+		// If the player didn't get simulated in the current frame then
+		// they didn't have a chance to touch this entity.
+		// Hence the touchlink could be broken and we only let the player check untouch.
+		int EFlags = GetEntData(g_aEntityLagData[i].iEntity, g_iEFlags);
+		EFlags &= ~EFL_CHECK_UNTOUCH;
+		SetEntData(g_aEntityLagData[i].iEntity, g_iEFlags, EFlags);
+
 		if(g_aEntityLagData[i].iDeleted)
 		{
 			if(g_aEntityLagData[i].iRecordsValid)
@@ -610,7 +622,7 @@ public void OnRunThinkFunctionsPost(bool simulating)
 			int iOldRecord = g_aEntityLagData[i].iRecordIndex;
 
 			if(CompareVectors(g_aaLagRecords[i][iOldRecord].vecAbsOrigin, TmpRecord.vecAbsOrigin) &&
-				CompareVectors(g_aaLagRecords[i][iOldRecord].angRotation, TmpRecord.angAbsRotation))
+				CompareVectors(g_aaLagRecords[i][iOldRecord].angAbsRotation, TmpRecord.angAbsRotation))
 			{
 				g_aEntityLagData[i].iNotMoving++;
 
@@ -678,12 +690,18 @@ public void OnRunThinkFunctionsPost(bool simulating)
 
 void RecordDataIntoRecord(int iEntity, LagRecord Record)
 {
+	// Force recalculation of all values
+	int EFlags = GetEntData(iEntity, g_iEFlags);
+	EFlags |= EFL_DIRTY_ABSTRANSFORM;
+	SetEntData(iEntity, g_iEFlags, EFlags);
+
 	SDKCall(g_hCalcAbsolutePosition, iEntity);
+
 	GetEntDataVector(iEntity, g_iVecOrigin, Record.vecOrigin);
 	GetEntDataVector(iEntity, g_iVecAbsOrigin, Record.vecAbsOrigin);
 	GetEntDataVector(iEntity, g_iAngRotation, Record.angRotation);
 	GetEntDataVector(iEntity, g_iAngAbsRotation, Record.angAbsRotation);
-	GetEntDataArray(iEntity, g_iCoordinateFrame, Record.rgflCoordinateFrame, 14, 4);
+	GetEntDataArray(iEntity, g_iCoordinateFrame, view_as<int>(Record.rgflCoordinateFrame), 14, 4);
 	Record.flSimulationTime = GetEntDataFloat(iEntity, g_iSimulationTime);
 }
 
@@ -725,30 +743,36 @@ bool DoesRotationInvalidateSurroundingBox(int iEntity)
 	}
 }
 
-void RestoreEntityFromRecord(int iEntity, LagRecord Record)
+void InvalidatePhysicsRecursive(int iEntity)
 {
-	SetEntDataVector(iEntity, g_iVecOrigin, Record.vecOrigin);
-	SetEntDataVector(iEntity, g_iVecAbsOrigin, Record.vecAbsOrigin);
-	SetEntDataVector(iEntity, g_iAngRotation, Record.angRotation);
-	SetEntDataVector(iEntity, g_iAngAbsRotation, Record.angAbsRotation);
-	SetEntDataFloat(iEntity, g_iSimulationTime, Record.flSimulationTime);
-	SetEntDataArray(iEntity, g_iCoordinateFrame, Record.rgflCoordinateFrame, 14, 4);
-
 	// NetworkProp()->MarkPVSInformationDirty()
 	int fStateFlags = GetEdictFlags(iEntity);
 	fStateFlags |= FL_EDICT_DIRTY_PVS_INFORMATION;
 	SetEdictFlags(iEntity, fStateFlags);
 
 	// CollisionProp()->MarkPartitionHandleDirty();
-	int CollisionProp = GetEntData(iEntity, g_iCollision);
+	Address CollisionProp = GetEntityAddress(iEntity) + view_as<Address>(g_iCollision);
 	SDKCall(g_hMarkPartitionHandleDirty, CollisionProp);
 
 	if(DoesRotationInvalidateSurroundingBox(iEntity))
 	{
+		// CollisionProp()->MarkSurroundingBoundsDirty();
 		int EFlags = GetEntData(iEntity, g_iEFlags);
 		EFlags |= EFL_DIRTY_SURROUNDING_COLLISION_BOUNDS;
 		SetEntData(iEntity, g_iEFlags, EFlags);
 	}
+}
+
+void RestoreEntityFromRecord(int iEntity, LagRecord Record)
+{
+	SetEntDataVector(iEntity, g_iVecOrigin, Record.vecOrigin);
+	SetEntDataVector(iEntity, g_iVecAbsOrigin, Record.vecAbsOrigin);
+	SetEntDataVector(iEntity, g_iAngRotation, Record.angRotation);
+	SetEntDataVector(iEntity, g_iAngAbsRotation, Record.angAbsRotation);
+	SetEntDataArray(iEntity, g_iCoordinateFrame, view_as<int>(Record.rgflCoordinateFrame), 14, 4);
+	SetEntDataFloat(iEntity, g_iSimulationTime, Record.flSimulationTime);
+
+	InvalidatePhysicsRecursive(iEntity);
 }
 
 bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
@@ -788,7 +812,7 @@ bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
 	g_aEntityLagData[i].iNotMoving = MAX_RECORDS;
 	g_aEntityLagData[i].bRestore = false;
 	g_aEntityLagData[i].bLateKill = bLateKill;
-	g_aEntityLagData[i].iTouchStamp = GetEntProp(iEntity, Prop_Data, "touchStamp");
+	g_aEntityLagData[i].iTouchStamp = GetEntData(iEntity, g_iTouchStamp);
 
 	RecordDataIntoRecord(iEntity, g_aaLagRecords[i][0]);
 

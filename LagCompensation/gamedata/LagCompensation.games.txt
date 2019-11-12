@@ -1,93 +1,93 @@
 "Games"
 {
-    "cstrike"
-    {
-        "Signatures"
-        {
-            "::UTIL_Remove"
-            {
-                "library"       "server"
-                "linux"         "@_Z11UTIL_RemoveP11CBaseEntity"
-            }
+	"cstrike"
+	{
+		"Signatures"
+		{
+			"::UTIL_Remove"
+			{
+				"library"		"server"
+				"linux"			"@_Z11UTIL_RemoveP11CBaseEntity"
+			}
 
-            "CCSGameRules::RestartRound"
-            {
-                "library"       "server"
-                "linux"         "@_ZN12CCSGameRules12RestartRoundEv"
-            }
+			"CCSGameRules::RestartRound"
+			{
+				"library"		"server"
+				"linux"			"@_ZN12CCSGameRules12RestartRoundEv"
+			}
 
-            "CLogicMeasureMovement::SetTarget"
-            {
-                "library"       "server"
-                "linux"         "@_ZN21CLogicMeasureMovement9SetTargetEPKc"
-            }
+			"CLogicMeasureMovement::SetTarget"
+			{
+				"library"		"server"
+				"linux"			"@_ZN21CLogicMeasureMovement9SetTargetEPKc"
+			}
 
-            "CalcAbsolutePosition"
-            {
-                "library"       "server"
-                "linux"         "@_ZN11CBaseEntity20CalcAbsolutePositionEv"
-            }
+			"CalcAbsolutePosition"
+			{
+				"library"		"server"
+				"linux"			"@_ZN11CBaseEntity20CalcAbsolutePositionEv"
+			}
 
-            "MarkPartitionHandleDirty"
-            {
-                "library"       "server"
-                "linux"         "@_ZN18CCollisionProperty24MarkPartitionHandleDirtyEv"
-            }
-        }
+			"MarkPartitionHandleDirty"
+			{
+				"library"		"server"
+				"linux"			"@_ZN18CCollisionProperty24MarkPartitionHandleDirtyEv"
+			}
+		}
 
-        "Functions"
-        {
-            "UTIL_Remove"
-            {
-                "signature"     "::UTIL_Remove"
-                "callconv"      "cdecl"
-                "return"        "void"
-                "arguments"
-                {
-                    "oldObj"
-                    {
-                        "type"    "cbaseentity"
-                    }
-                }
-            }
+		"Functions"
+		{
+			"UTIL_Remove"
+			{
+				"signature"		"::UTIL_Remove"
+				"callconv"		"cdecl"
+				"return"		"void"
+				"arguments"
+				{
+					"oldObj"
+					{
+						"type"	  "cbaseentity"
+					}
+				}
+			}
 
-            "CCSGameRules__RestartRound"
-            {
-                "signature"     "CCSGameRules::RestartRound"
-                "callconv"      "thiscall"
-                "return"        "void"
-                "this"          "ignore"
-            }
+			"CCSGameRules__RestartRound"
+			{
+				"signature"		"CCSGameRules::RestartRound"
+				"callconv"		"thiscall"
+				"return"		"void"
+				"this"			"ignore"
+			}
 
-            "CLogicMeasureMovement__SetTarget"
-            {
-                "signature"     "CLogicMeasureMovement::SetTarget"
-                "callconv"      "thiscall"
-                "return"        "void"
-                "this"          "entity"
-                "arguments"
-                {
-                    "pName"
-                    {
-                        "type"    "charptr"
-                    }
-                }
-            }
+			"CLogicMeasureMovement__SetTarget"
+			{
+				"signature"		"CLogicMeasureMovement::SetTarget"
+				"callconv"		"thiscall"
+				"return"		"void"
+				"this"			"entity"
+				"arguments"
+				{
+					"pName"
+					{
+						"type"	  "charptr"
+					}
+				}
+			}
 
-            "CLogicMeasureMovement__SetTarget_post"
-            {
-                "signature"     "CLogicMeasureMovement::SetTarget"
-                "callconv"      "thiscall"
-                "return"        "void"
-                "this"          "ignore"
-                "arguments"
-                {
-                    "pName"
-                    {
-                        "type"    "charptr"
-                    }
-                }
-            }
-        }
-    }
+			"CLogicMeasureMovement__SetTarget_post"
+			{
+				"signature"		"CLogicMeasureMovement::SetTarget"
+				"callconv"		"thiscall"
+				"return"		"void"
+				"this"			"ignore"
+				"arguments"
+				{
+					"pName"
+					{
+						"type"	  "charptr"
+					}
+				}
+			}
+		}
+	}
 }
