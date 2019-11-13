@@ -51,7 +51,7 @@ enum
 };
 
 #define MAX_RECORDS 32
-#define MAX_ENTITIES 128
+#define MAX_ENTITIES 256
 //#define DEBUG
 
 enum struct LagRecord
