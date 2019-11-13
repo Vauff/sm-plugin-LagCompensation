@@ -25,6 +25,7 @@ bool g_bLateLoad = false;
 #define EFL_DIRTY_ABSTRANSFORM (1<<11)
 #define EFL_DIRTY_SURROUNDING_COLLISION_BOUNDS (1<<14)
 #define EFL_CHECK_UNTOUCH (1<<24)
+#define COORDINATE_FRAME_SIZE 14
 
 enum
 {
@@ -60,7 +61,7 @@ enum struct LagRecord
 	float angRotation[3];
 	float angAbsRotation[3];
 	float flSimulationTime;
-	float rgflCoordinateFrame[14];
+	float rgflCoordinateFrame[COORDINATE_FRAME_SIZE];
 }
 
 enum struct EntityLagData
@@ -211,6 +212,664 @@ public void OnPluginStart()
 	FilterClientEntityMap(g_aaBlockTouch, true);
 }
 
+public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
+{
+	g_bLateLoad = late;
+	return APLRes_Success;
+}
+
+public void OnPluginEnd()
+{
+	g_bCleaningUp = true;
+	FilterClientEntityMap(g_aaBlockTouch, false);
+	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, false);
+
+	DHookDisableDetour(g_hUTIL_Remove, false, Detour_OnUTIL_Remove);
+
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
+			continue;
+
+		if(g_aEntityLagData[i].iDeleted)
+		{
+			RemoveEdict(g_aEntityLagData[i].iEntity);
+		}
+	}
+}
+
+public void OnMapStart()
+{
+	bool bLate = g_bLateLoad;
+	g_bLateLoad = false;
+
+	g_bCleaningUp = false;
+
+	g_iTouchStamp = FindDataMapInfo(0, "touchStamp");
+	g_iCollision = FindDataMapInfo(0, "m_Collision");
+	g_iSolidFlags = FindDataMapInfo(0, "m_usSolidFlags");
+	g_iSolidType = FindDataMapInfo(0, "m_nSolidType");
+	g_iSurroundType = FindDataMapInfo(0, "m_nSurroundType");
+	g_iEFlags = FindDataMapInfo(0, "m_iEFlags");
+
+	g_iVecOrigin = FindDataMapInfo(0, "m_vecOrigin");
+	g_iVecAbsOrigin = FindDataMapInfo(0, "m_vecAbsOrigin");
+	g_iAngRotation = FindDataMapInfo(0, "m_angRotation");
+	g_iAngAbsRotation = FindDataMapInfo(0, "m_angAbsRotation");
+	g_iSimulationTime = FindDataMapInfo(0, "m_flSimulationTime");
+	g_iCoordinateFrame = FindDataMapInfo(0, "m_rgflCoordinateFrame");
+
+	/* Late Load */
+	if(bLate)
+	{
+		int entity = INVALID_ENT_REFERENCE;
+		while((entity = FindEntityByClassname(entity, "*")) != INVALID_ENT_REFERENCE)
+		{
+			char sClassname[64];
+			if(GetEntityClassname(entity, sClassname, sizeof(sClassname)))
+				OnEntitySpawned(entity, sClassname);
+		}
+	}
+}
+
+public void OnEntitySpawned(int entity, const char[] classname)
+{
+	if(g_bCleaningUp)
+		return;
+
+	if(entity < 0 || entity > MAX_EDICTS)
+		return;
+
+	if(!IsValidEntity(entity))
+		return;
+
+	bool bTrigger = StrEqual(classname, "trigger_hurt", false) ||
+					StrEqual(classname, "trigger_push", false) ||
+					StrEqual(classname, "trigger_teleport", false) ||
+					StrEqual(classname, "trigger_multiple", false);
+
+	bool bMoving = !strncmp(classname, "func_physbox", 12, false);
+
+	if(!bTrigger && !bMoving)
+		return;
+
+	// Don't lag compensate anything that could be parented to a player
+	// The player simulation would usually move the entity,
+	// but we would overwrite that position change by restoring the entity to its previous state.
+	int iParent = INVALID_ENT_REFERENCE;
+	char sParentClassname[64];
+	for(int iTmp = entity;;)
+	{
+		iTmp = GetEntPropEnt(iTmp, Prop_Data, "m_pParent");
+		if(iTmp == INVALID_ENT_REFERENCE)
+			break;
+
+		iParent = iTmp;
+		GetEntityClassname(iParent, sParentClassname, sizeof(sParentClassname));
+
+		if(StrEqual(sParentClassname, "player") ||
+			!strncmp(sParentClassname, "weapon_", 7))
+		{
+			return;
+		}
+	}
+
+	// Lag compensate all moving stuff
+	if(bMoving)
+	{
+		AddEntityForLagCompensation(entity, false);
+		return;
+	}
+
+	// Lag compensate all (non player-) parented hurt triggers
+	if(bTrigger && iParent > MaxClients && iParent < MAX_EDICTS)
+	{
+		if(AddEntityForLagCompensation(entity, true))
+		{
+			// Filter the trigger from being touched outside of the lag compensation
+			g_aBlockTriggerTouch[entity] = 1;
+		}
+	}
+}
+
+public void OnEntityDestroyed(int entity)
+{
+	if(g_bCleaningUp)
+		return;
+
+	if(entity < 0 || entity > MAX_EDICTS)
+		return;
+
+	if(!IsValidEntity(entity))
+		return;
+
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		if(g_aEntityLagData[i].iEntity != entity)
+			continue;
+
+		RemoveRecord(i);
+		return;
+	}
+}
+
+
+public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
+{
+	if(g_bCleaningUp)
+		return MRES_Ignored;
+
+	int entity = DHookGetParam(hParams, 1);
+	if(entity < 0 || entity > MAX_EDICTS)
+		return MRES_Ignored;
+
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		if(g_aEntityLagData[i].iEntity != entity)
+			continue;
+
+		// let it die
+		if(!g_aEntityLagData[i].bLateKill)
+			break;
+
+		// ignore sleeping entities
+		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
+			break;
+
+		if(!g_aEntityLagData[i].iDeleted)
+		{
+			g_aEntityLagData[i].iDeleted = GetGameTickCount();
+		}
+
+		return MRES_Supercede;
+	}
+
+	return MRES_Ignored;
+}
+
+public MRESReturn Detour_OnRestartRound()
+{
+	g_bCleaningUp = true;
+
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		g_aBlockTriggerTouch[g_aEntityLagData[i].iEntity] = 0;
+
+		for(int client = 1; client <= MaxClients; client++)
+		{
+			g_aaBlockTouch[client][g_aEntityLagData[i].iEntity] = 0;
+		}
+
+		if(g_aEntityLagData[i].iDeleted)
+		{
+			if(IsValidEntity(g_aEntityLagData[i].iEntity))
+				RemoveEdict(g_aEntityLagData[i].iEntity);
+		}
+
+		g_aEntityLagData[i].iEntity = INVALID_ENT_REFERENCE;
+	}
+
+	g_iNumEntities = 0;
+
+	g_bCleaningUp = false;
+	return MRES_Ignored;
+}
+
+// https://developer.valvesoftware.com/wiki/Logic_measure_movement
+int g_OnSetTarget_pThis;
+public MRESReturn Detour_OnSetTargetPre(int pThis, Handle hParams)
+{
+	g_OnSetTarget_pThis = pThis;
+	return MRES_Ignored;
+}
+public MRESReturn Detour_OnSetTargetPost(Handle hParams)
+{
+	int entity = GetEntPropEnt(g_OnSetTarget_pThis, Prop_Data, "m_hTarget");
+	if(!IsValidEntity(entity))
+		return MRES_Ignored;
+
+	char sClassname[64];
+	if(!GetEntityClassname(entity, sClassname, sizeof(sClassname)))
+		return MRES_Ignored;
+
+	if(!(StrEqual(sClassname, "trigger_hurt", false) ||
+		StrEqual(sClassname, "trigger_push", false) ||
+		StrEqual(sClassname, "trigger_teleport", false)))
+	{
+		return MRES_Ignored;
+	}
+
+	if(AddEntityForLagCompensation(entity, true))
+	{
+		// Filter the trigger from being touched outside of the lag compensation
+		g_aBlockTriggerTouch[entity] = 1;
+	}
+
+	return MRES_Ignored;
+}
+
+public MRESReturn Detour_OnFrameUpdatePostEntityThink()
+{
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		// Don't make the entity check untouch in FrameUpdatePostEntityThink.
+		// If the player didn't get simulated in the current frame then
+		// they didn't have a chance to touch this entity.
+		// Hence the touchlink could be broken and we only let the player check untouch.
+		int EFlags = GetEntData(g_aEntityLagData[i].iEntity, g_iEFlags);
+		EFlags &= ~EFL_CHECK_UNTOUCH;
+		SetEntData(g_aEntityLagData[i].iEntity, g_iEFlags, EFlags);
+	}
+}
+
+
+public void OnRunThinkFunctions(bool simulating)
+{
+	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, false);
+
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
+		{
+			PrintToBoth("!!!!!!!!!!! OnRunThinkFunctions SHIT deleted: %d / %d", i, g_aEntityLagData[i].iEntity);
+			RemoveRecord(i);
+			i--; continue;
+		}
+
+		// Save old touchStamp
+		int touchStamp = GetEntData(g_aEntityLagData[i].iEntity, g_iTouchStamp);
+		g_aEntityLagData[i].iTouchStamp = touchStamp;
+		// We have to increase the touchStamp by 1 here to avoid breaking the touchlink.
+		// The touchStamp is incremented by 1 every time an entities physics are simulated.
+		// When two entities touch then a touchlink is created on both entities with the touchStamp of either entity.
+		// Usually the player would touch the trigger first and then the trigger would touch the player later on in the same frame.
+		// The trigger touching the player would fix up the touchStamp (which was increased by 1 by the trigger physics simulate)
+		// But since we're blocking the trigger from ever touching a player outside of here we need to manually increase it by 1 up front
+		// so the correct +1'd touchStamp is stored in the touchlink.
+		// After simulating the players we restore the old touchStamp (-1) and when the entity is simulated it will increase it again by 1
+		// Thus both touchlinks will have the correct touchStamp value.
+		// The touchStamp doesn't increase when the entity is idle, however it also doesn't check untouch so we're fine.
+		touchStamp++;
+		SetEntData(g_aEntityLagData[i].iEntity, g_iTouchStamp, touchStamp);
+
+		if(g_aEntityLagData[i].iDeleted)
+		{
+			if(g_aEntityLagData[i].iDeleted + MAX_RECORDS <= GetGameTickCount())
+			{
+				// calls OnEntityDestroyed right away
+				// which calls RemoveRecord
+				// which moves the next element to our current position
+				RemoveEdict(g_aEntityLagData[i].iEntity);
+				i--; continue;
+			}
+			continue;
+		}
+
+		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
+			continue;
+
+		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aEntityLagData[i].RestoreData);
+	}
+}
+
+public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
+{
+	if(!IsPlayerAlive(client))
+		return Plugin_Continue;
+
+	int iGameTick = GetGameTickCount();
+
+	int iDelta = iGameTick - tickcount;
+	if(iDelta < 0)
+		iDelta = 0;
+
+	if(iDelta > MAX_RECORDS)
+		iDelta = MAX_RECORDS;
+
+	int iPlayerSimTick = iGameTick - iDelta;
+
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		int iEntity = g_aEntityLagData[i].iEntity;
+
+		// Entity too new, the client couldn't even see it yet.
+		if(g_aEntityLagData[i].iSpawned > iPlayerSimTick)
+		{
+			g_aaBlockTouch[client][iEntity] = 1;
+			continue;
+		}
+		else if(g_aEntityLagData[i].iSpawned == iPlayerSimTick)
+		{
+			g_aaBlockTouch[client][iEntity] = 0;
+		}
+
+		if(g_aEntityLagData[i].iDeleted)
+		{
+			if(g_aEntityLagData[i].iDeleted <= iPlayerSimTick)
+			{
+				g_aaBlockTouch[client][iEntity] = 1;
+				continue;
+			}
+		}
+
+		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
+			continue;
+
+		// +1 because the newest record in the list is one tick old
+		// this is because we simulate players first
+		// hence no new entity record was inserted on the current tick
+		iDelta += 1;
+		if(iDelta >= g_aEntityLagData[i].iNumRecords)
+			iDelta = g_aEntityLagData[i].iNumRecords - 1;
+
+		int iRecordIndex = g_aEntityLagData[i].iRecordIndex - iDelta;
+		if(iRecordIndex < 0)
+			iRecordIndex += MAX_RECORDS;
+
+		RestoreEntityFromRecord(iEntity, g_aaLagRecords[i][iRecordIndex]);
+		g_aEntityLagData[i].bRestore |= !g_aEntityLagData[i].iDeleted;
+	}
+
+	return Plugin_Continue;
+}
+
+public void OnPostPlayerThinkFunctions()
+{
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		// Restore original touchStamp
+		SetEntData(g_aEntityLagData[i].iEntity, g_iTouchStamp, g_aEntityLagData[i].iTouchStamp);
+
+		if(!g_aEntityLagData[i].bRestore)
+			continue;
+
+		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, g_aEntityLagData[i].RestoreData);
+		g_aEntityLagData[i].bRestore = false;
+	}
+
+	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, true);
+}
+
+public void OnRunThinkFunctionsPost(bool simulating)
+{
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		if(g_aEntityLagData[i].iDeleted)
+		{
+			if(g_aEntityLagData[i].iRecordsValid)
+			{
+				g_aEntityLagData[i].iRecordIndex++;
+
+				if(g_aEntityLagData[i].iRecordIndex >= MAX_RECORDS)
+					g_aEntityLagData[i].iRecordIndex = 0;
+
+				g_aEntityLagData[i].iRecordsValid--;
+			}
+
+			continue;
+		}
+
+		LagRecord TmpRecord;
+		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, TmpRecord);
+
+		// sleep detection
+		{
+			int iOldRecord = g_aEntityLagData[i].iRecordIndex;
+
+			if(CompareVectors(g_aaLagRecords[i][iOldRecord].vecAbsOrigin, TmpRecord.vecAbsOrigin) &&
+				CompareVectors(g_aaLagRecords[i][iOldRecord].angAbsRotation, TmpRecord.angAbsRotation))
+			{
+				g_aEntityLagData[i].iNotMoving++;
+			}
+			else
+			{
+				g_aEntityLagData[i].iNotMoving = 0;
+			}
+
+			if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
+				continue;
+		}
+
+		g_aEntityLagData[i].iRecordIndex++;
+
+		if(g_aEntityLagData[i].iRecordIndex >= MAX_RECORDS)
+			g_aEntityLagData[i].iRecordIndex = 0;
+
+		if(g_aEntityLagData[i].iNumRecords < MAX_RECORDS)
+			g_aEntityLagData[i].iRecordsValid = ++g_aEntityLagData[i].iNumRecords;
+
+		LagRecord_Copy(g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex], TmpRecord);
+	}
+}
+
+
+void RecordDataIntoRecord(int iEntity, LagRecord Record)
+{
+	// Force recalculation of all values
+	int EFlags = GetEntData(iEntity, g_iEFlags);
+	EFlags |= EFL_DIRTY_ABSTRANSFORM;
+	SetEntData(iEntity, g_iEFlags, EFlags);
+
+	SDKCall(g_hCalcAbsolutePosition, iEntity);
+
+	GetEntDataVector(iEntity, g_iVecOrigin, Record.vecOrigin);
+	GetEntDataVector(iEntity, g_iVecAbsOrigin, Record.vecAbsOrigin);
+	GetEntDataVector(iEntity, g_iAngRotation, Record.angRotation);
+	GetEntDataVector(iEntity, g_iAngAbsRotation, Record.angAbsRotation);
+	GetEntDataArray(iEntity, g_iCoordinateFrame, view_as<int>(Record.rgflCoordinateFrame), COORDINATE_FRAME_SIZE);
+	Record.flSimulationTime = GetEntDataFloat(iEntity, g_iSimulationTime);
+}
+
+bool DoesRotationInvalidateSurroundingBox(int iEntity)
+{
+	int SolidFlags = GetEntData(iEntity, g_iSolidFlags);
+	if(SolidFlags & FSOLID_ROOT_PARENT_ALIGNED)
+		return true;
+
+	int SurroundType = GetEntData(iEntity, g_iSurroundType);
+	switch(SurroundType)
+	{
+		case USE_COLLISION_BOUNDS_NEVER_VPHYSICS,
+			 USE_OBB_COLLISION_BOUNDS,
+			 USE_BEST_COLLISION_BOUNDS:
+		{
+			// IsBoundsDefinedInEntitySpace()
+			int SolidType = GetEntData(iEntity, g_iSolidType);
+			return ((SolidFlags & FSOLID_FORCE_WORLD_ALIGNED) == 0) &&
+					(SolidType != SOLID_BBOX) && (SolidType != SOLID_NONE);
+		}
+
+		case USE_HITBOXES,
+			 USE_GAME_CODE:
+		{
+			return true;
+		}
+
+		case USE_ROTATION_EXPANDED_BOUNDS,
+			 USE_SPECIFIED_BOUNDS:
+		{
+			return false;
+		}
+
+		default:
+		{
+			return true;
+		}
+	}
+}
+
+void InvalidatePhysicsRecursive(int iEntity)
+{
+	// NetworkProp()->MarkPVSInformationDirty()
+	int fStateFlags = GetEdictFlags(iEntity);
+	fStateFlags |= FL_EDICT_DIRTY_PVS_INFORMATION;
+	SetEdictFlags(iEntity, fStateFlags);
+
+	// CollisionProp()->MarkPartitionHandleDirty();
+	Address CollisionProp = GetEntityAddress(iEntity) + view_as<Address>(g_iCollision);
+	SDKCall(g_hMarkPartitionHandleDirty, CollisionProp);
+
+	if(DoesRotationInvalidateSurroundingBox(iEntity))
+	{
+		// CollisionProp()->MarkSurroundingBoundsDirty();
+		int EFlags = GetEntData(iEntity, g_iEFlags);
+		EFlags |= EFL_DIRTY_SURROUNDING_COLLISION_BOUNDS;
+		SetEntData(iEntity, g_iEFlags, EFlags);
+	}
+}
+
+void RestoreEntityFromRecord(int iEntity, LagRecord Record)
+{
+	SetEntDataVector(iEntity, g_iVecOrigin, Record.vecOrigin);
+	SetEntDataVector(iEntity, g_iVecAbsOrigin, Record.vecAbsOrigin);
+	SetEntDataVector(iEntity, g_iAngRotation, Record.angRotation);
+	SetEntDataVector(iEntity, g_iAngAbsRotation, Record.angAbsRotation);
+	SetEntDataArray(iEntity, g_iCoordinateFrame, view_as<int>(Record.rgflCoordinateFrame), COORDINATE_FRAME_SIZE);
+	SetEntDataFloat(iEntity, g_iSimulationTime, Record.flSimulationTime);
+
+	InvalidatePhysicsRecursive(iEntity);
+}
+
+
+bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
+{
+	if(g_bCleaningUp)
+		return false;
+
+	if(g_iNumEntities == MAX_ENTITIES)
+	{
+		char sClassname[64];
+		GetEntityClassname(iEntity, sClassname, sizeof(sClassname));
+
+		char sTargetname[64];
+		GetEntPropString(iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+
+		int iHammerID = GetEntProp(iEntity, Prop_Data, "m_iHammerID");
+
+		PrintToBoth("[%d] OUT OF LAGCOMP SLOTS entity %d (%s)\"%s\"(#%d)", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID);
+		return false;
+	}
+
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		if(g_aEntityLagData[i].iEntity == iEntity)
+			return true;
+	}
+
+	int i = g_iNumEntities;
+	g_iNumEntities++;
+
+	g_aEntityLagData[i].iEntity = iEntity;
+	g_aEntityLagData[i].iRecordIndex = 0;
+	g_aEntityLagData[i].iNumRecords = 1;
+	g_aEntityLagData[i].iRecordsValid = 1;
+	g_aEntityLagData[i].iSpawned = GetGameTickCount();
+	g_aEntityLagData[i].iDeleted = 0;
+	g_aEntityLagData[i].iNotMoving = MAX_RECORDS;
+	g_aEntityLagData[i].bRestore = false;
+	g_aEntityLagData[i].bLateKill = bLateKill;
+	g_aEntityLagData[i].iTouchStamp = GetEntData(iEntity, g_iTouchStamp);
+
+	RecordDataIntoRecord(iEntity, g_aaLagRecords[i][0]);
+
+	{
+		char sClassname[64];
+		GetEntityClassname(iEntity, sClassname, sizeof(sClassname));
+
+		char sTargetname[64];
+		GetEntPropString(iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+
+		int iHammerID = GetEntProp(iEntity, Prop_Data, "m_iHammerID");
+
+		PrintToBoth("[%d] added entity %d (%s)\"%s\"(#%d) under index %d", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID, i);
+	}
+
+	return true;
+}
+
+void RemoveRecord(int index)
+{
+	if(g_bCleaningUp)
+		return;
+
+	{
+		char sClassname[64];
+		GetEntityClassname(g_aEntityLagData[index].iEntity, sClassname, sizeof(sClassname));
+
+		char sTargetname[64];
+		GetEntPropString(g_aEntityLagData[index].iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+
+		int iHammerID = GetEntProp(g_aEntityLagData[index].iEntity, Prop_Data, "m_iHammerID");
+
+		PrintToBoth("[%d] RemoveRecord %d / %d (%s)\"%s\"(#%d), num: %d", GetGameTickCount(), index, g_aEntityLagData[index].iEntity, sClassname, sTargetname, iHammerID, g_iNumEntities);
+	}
+
+	g_aBlockTriggerTouch[g_aEntityLagData[index].iEntity] = 0;
+
+	for(int client = 1; client <= MaxClients; client++)
+	{
+		g_aaBlockTouch[client][g_aEntityLagData[index].iEntity] = 0;
+	}
+
+	g_aEntityLagData[index].iEntity = INVALID_ENT_REFERENCE;
+
+	for(int src = index + 1; src < g_iNumEntities; src++)
+	{
+		int dest = src - 1;
+
+		EntityLagData_Copy(g_aEntityLagData[dest], g_aEntityLagData[src]);
+		g_aEntityLagData[src].iEntity = INVALID_ENT_REFERENCE;
+
+		int iNumRecords = g_aEntityLagData[dest].iNumRecords;
+		for(int i = 0; i < iNumRecords; i++)
+		{
+			LagRecord_Copy(g_aaLagRecords[dest][i], g_aaLagRecords[src][i]);
+		}
+	}
+
+	g_iNumEntities--;
+}
+
+void EntityLagData_Copy(EntityLagData obj, const EntityLagData other)
+{
+	obj.iEntity = other.iEntity;
+	obj.iRecordIndex = other.iRecordIndex;
+	obj.iNumRecords = other.iNumRecords;
+	obj.iRecordsValid = other.iRecordsValid;
+	obj.iSpawned = other.iSpawned;
+	obj.iDeleted = other.iDeleted;
+	obj.iNotMoving = other.iNotMoving;
+	obj.iTouchStamp = other.iTouchStamp;
+	obj.bRestore = other.bRestore;
+	obj.bLateKill = other.bLateKill;
+
+	LagRecord_Copy(obj.RestoreData, other.RestoreData);
+}
+
+void LagRecord_Copy(LagRecord obj, const LagRecord other)
+{
+	for(int i = 0; i < 3; i++)
+	{
+		obj.vecOrigin[i] = other.vecOrigin[i];
+		obj.vecAbsOrigin[i] = other.vecAbsOrigin[i];
+		obj.angRotation[i] = other.angRotation[i];
+		obj.angAbsRotation[i] = other.angAbsRotation[i];
+	}
+
+	obj.flSimulationTime = other.flSimulationTime;
+
+	for(int i = 0; i < COORDINATE_FRAME_SIZE; i++)
+	{
+		obj.rgflCoordinateFrame[i] = other.rgflCoordinateFrame[i];
+	}
+}
+
+bool CompareVectors(const float vec1[3], const float vec2[3])
+{
+	return vec1[0] == vec2[0] && vec1[1] == vec2[1] && vec1[2] == vec2[2];
+}
+
+
 public Action Command_AddLagCompensation(int client, int argc)
 {
 	if(argc < 1)
@@ -295,743 +954,6 @@ public Action Command_CheckLagCompensated(int client, int argc)
 	return Plugin_Handled;
 }
 
-public void OnPluginEnd()
-{
-	g_bCleaningUp = true;
-	FilterClientEntityMap(g_aaBlockTouch, false);
-	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, false);
-
-	DHookDisableDetour(g_hUTIL_Remove, false, Detour_OnUTIL_Remove);
-
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
-			continue;
-
-		if(g_aEntityLagData[i].iDeleted)
-		{
-			RemoveEdict(g_aEntityLagData[i].iEntity);
-		}
-	}
-}
-
-public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
-{
-	g_bLateLoad = late;
-	return APLRes_Success;
-}
-
-public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
-{
-	if(g_bCleaningUp)
-		return MRES_Ignored;
-
-	int entity = DHookGetParam(hParams, 1);
-	if(entity < 0 || entity > MAX_EDICTS)
-		return MRES_Ignored;
-
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		if(g_aEntityLagData[i].iEntity != entity)
-			continue;
-
-		// let it die
-		if(!g_aEntityLagData[i].bLateKill)
-			break;
-
-		// ignore sleeping entities
-		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
-			break;
-
-		if(!g_aEntityLagData[i].iDeleted)
-		{
-			g_aEntityLagData[i].iDeleted = GetGameTickCount();
-			PrintToBoth("[%d] !!!!!!!!!!! Detour_OnUTIL_Remove: %d / ent: %d", GetGameTickCount(), i, entity);
-		}
-
-		return MRES_Supercede;
-	}
-
-	return MRES_Ignored;
-}
-
-public MRESReturn Detour_OnRestartRound()
-{
-	g_bCleaningUp = true;
-	PrintToBoth("Detour_OnRestartRound with %d entries.", g_iNumEntities);
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		g_aBlockTriggerTouch[g_aEntityLagData[i].iEntity] = 0;
-
-		for(int client = 1; client <= MaxClients; client++)
-		{
-			g_aaBlockTouch[client][g_aEntityLagData[i].iEntity] = 0;
-		}
-
-		if(g_aEntityLagData[i].iDeleted)
-		{
-			if(IsValidEntity(g_aEntityLagData[i].iEntity))
-				RemoveEdict(g_aEntityLagData[i].iEntity);
-		}
-
-		g_aEntityLagData[i].iEntity = INVALID_ENT_REFERENCE;
-	}
-
-	g_iNumEntities = 0;
-
-	g_bCleaningUp = false;
-	return MRES_Ignored;
-}
-
-// https://developer.valvesoftware.com/wiki/Logic_measure_movement
-int g_OnSetTarget_pThis;
-public MRESReturn Detour_OnSetTargetPre(int pThis, Handle hParams)
-{
-	g_OnSetTarget_pThis = pThis;
-	return MRES_Ignored;
-}
-public MRESReturn Detour_OnSetTargetPost(Handle hParams)
-{
-	int entity = GetEntPropEnt(g_OnSetTarget_pThis, Prop_Data, "m_hTarget");
-	if(!IsValidEntity(entity))
-		return MRES_Ignored;
-
-	char sClassname[64];
-	if(!GetEntityClassname(entity, sClassname, sizeof(sClassname)))
-		return MRES_Ignored;
-
-	if(!(StrEqual(sClassname, "trigger_hurt", false) ||
-		StrEqual(sClassname, "trigger_push", false) ||
-		StrEqual(sClassname, "trigger_teleport", false)))
-	{
-		return MRES_Ignored;
-	}
-
-	if(AddEntityForLagCompensation(entity, true))
-	{
-		// Filter the trigger from being touched outside of the lag compensation
-		g_aBlockTriggerTouch[entity] = 1;
-	}
-
-	return MRES_Ignored;
-}
-
-public void OnMapStart()
-{
-	bool bLate = g_bLateLoad;
-	g_bLateLoad = false;
-
-	g_bCleaningUp = false;
-
-	g_iTouchStamp = FindDataMapInfo(0, "touchStamp");
-	g_iCollision = FindDataMapInfo(0, "m_Collision");
-	g_iSolidFlags = FindDataMapInfo(0, "m_usSolidFlags");
-	g_iSolidType = FindDataMapInfo(0, "m_nSolidType");
-	g_iSurroundType = FindDataMapInfo(0, "m_nSurroundType");
-	g_iEFlags = FindDataMapInfo(0, "m_iEFlags");
-
-	g_iVecOrigin = FindDataMapInfo(0, "m_vecOrigin");
-	g_iVecAbsOrigin = FindDataMapInfo(0, "m_vecAbsOrigin");
-	g_iAngRotation = FindDataMapInfo(0, "m_angRotation");
-	g_iAngAbsRotation = FindDataMapInfo(0, "m_angAbsRotation");
-	g_iSimulationTime = FindDataMapInfo(0, "m_flSimulationTime");
-	g_iCoordinateFrame = FindDataMapInfo(0, "m_rgflCoordinateFrame");
-
-	/* Late Load */
-	if(bLate)
-	{
-		int entity = INVALID_ENT_REFERENCE;
-		while((entity = FindEntityByClassname(entity, "*")) != INVALID_ENT_REFERENCE)
-		{
-			char sClassname[64];
-			if(GetEntityClassname(entity, sClassname, sizeof(sClassname)))
-				OnEntitySpawned(entity, sClassname);
-		}
-	}
-}
-
-public void OnRunThinkFunctions(bool simulating)
-{
-	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, false);
-
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
-		{
-			PrintToBoth("!!!!!!!!!!! OnRunThinkFunctions SHIT deleted: %d / %d", i, g_aEntityLagData[i].iEntity);
-			RemoveRecord(i);
-			i--; continue;
-		}
-
-		// Save old touchStamp
-		int touchStamp = GetEntData(g_aEntityLagData[i].iEntity, g_iTouchStamp);
-		g_aEntityLagData[i].iTouchStamp = touchStamp;
-		// We have to increase the touchStamp by 1 here to avoid breaking the touchlink.
-		// The touchStamp is incremented by 1 every time an entities physics are simulated.
-		// When two entities touch then a touchlink is created on both entities with the touchStamp of either entity.
-		// Usually the player would touch the trigger first and then the trigger would touch the player later on in the same frame.
-		// The trigger touching the player would fix up the touchStamp (which was increased by 1 by the trigger physics simulate)
-		// But since we're blocking the trigger from ever touching a player outside of here we need to manually increase it by 1 up front
-		// so the correct +1'd touchStamp is stored in the touchlink.
-		// After simulating the players we restore the old touchStamp (-1) and when the entity is simulated it will increase it again by 1
-		// Thus both touchlinks will have the correct touchStamp value.
-		// The touchStamp doesn't increase when the entity is idle, however it also doesn't check untouch so we're fine.
-		touchStamp++;
-		SetEntData(g_aEntityLagData[i].iEntity, g_iTouchStamp, touchStamp);
-
-		if(g_aEntityLagData[i].iDeleted)
-		{
-			if(g_aEntityLagData[i].iDeleted + MAX_RECORDS <= GetGameTickCount())
-			{
-				PrintToBoth("[%d] !!!!!!!!!!! RemoveEdict: %d / ent: %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity);
-				// calls OnEntityDestroyed right away
-				// which calls RemoveRecord
-				// which moves the next element to our current position
-				RemoveEdict(g_aEntityLagData[i].iEntity);
-				i--; continue;
-			}
-			continue;
-		}
-
-		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
-			continue;
-
-		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aEntityLagData[i].RestoreData);
-
-#if defined DEBUG
-		LogMessage("1 [%d] [%d] index %d, RECORD entity %d", GetGameTickCount(), i, simulating, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
-		LogMessage("%f %f %f",
-			g_aEntityLagData[i].RestoreData.vecOrigin[0],
-			g_aEntityLagData[i].RestoreData.vecOrigin[1],
-			g_aEntityLagData[i].RestoreData.vecOrigin[2]
-		);
-#endif
-	}
-}
-
-public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
-{
-	if(!IsPlayerAlive(client))
-		return Plugin_Continue;
-
-	int iGameTick = GetGameTickCount();
-
-	int iDelta = iGameTick - tickcount;
-	if(iDelta < 0)
-		iDelta = 0;
-
-	if(iDelta > MAX_RECORDS)
-		iDelta = MAX_RECORDS;
-
-	int iPlayerSimTick = iGameTick - iDelta;
-
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		int iEntity = g_aEntityLagData[i].iEntity;
-
-		// Entity too new, the client couldn't even see it yet.
-		if(g_aEntityLagData[i].iSpawned > iPlayerSimTick)
-		{
-			g_aaBlockTouch[client][iEntity] = 1;
-			continue;
-		}
-		else if(g_aEntityLagData[i].iSpawned == iPlayerSimTick)
-		{
-			g_aaBlockTouch[client][iEntity] = 0;
-		}
-
-		if(g_aEntityLagData[i].iDeleted)
-		{
-			if(g_aEntityLagData[i].iDeleted <= iPlayerSimTick)
-			{
-				g_aaBlockTouch[client][iEntity] = 1;
-				continue;
-			}
-		}
-
-		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
-			continue;
-
-		// +1 because the newest record in the list is one tick old
-		// this is because we simulate players first
-		// hence no new entity record was inserted on the current tick
-		iDelta += 1;
-		if(iDelta >= g_aEntityLagData[i].iNumRecords)
-			iDelta = g_aEntityLagData[i].iNumRecords - 1;
-
-		int iRecordIndex = g_aEntityLagData[i].iRecordIndex - iDelta;
-		if(iRecordIndex < 0)
-			iRecordIndex += MAX_RECORDS;
-
-		RestoreEntityFromRecord(iEntity, g_aaLagRecords[i][iRecordIndex]);
-		g_aEntityLagData[i].bRestore |= !g_aEntityLagData[i].iDeleted;
-
-#if defined DEBUG
-		LogMessage("2 [%d] index %d, Entity %d -> iDelta = %d | Record = %d", iGameTick, i, iEntity, iDelta, iRecordIndex);
-		LogMessage("%f %f %f",
-			g_aaLagRecords[i][iRecordIndex].vecOrigin[0],
-			g_aaLagRecords[i][iRecordIndex].vecOrigin[1],
-			g_aaLagRecords[i][iRecordIndex].vecOrigin[2]
-		);
-#endif
-	}
-
-	return Plugin_Continue;
-}
-
-public void OnPostPlayerThinkFunctions()
-{
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		SetEntData(g_aEntityLagData[i].iEntity, g_iTouchStamp, g_aEntityLagData[i].iTouchStamp);
-
-		if(!g_aEntityLagData[i].bRestore)
-			continue;
-
-		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, g_aEntityLagData[i].RestoreData);
-		g_aEntityLagData[i].bRestore = false;
-
-#if defined DEBUG
-		LogMessage("3 [%d] index %d, RESTORE entity %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
-		LogMessage("%f %f %f",
-			g_aEntityLagData[i].RestoreData.vecOrigin[0],
-			g_aEntityLagData[i].RestoreData.vecOrigin[1],
-			g_aEntityLagData[i].RestoreData.vecOrigin[2]
-		);
-#endif
-	}
-
-	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, true);
-}
-
-public void OnRunThinkFunctionsPost(bool simulating)
-{
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		// Don't make the entity check untouch in FrameUpdatePostEntityThink.
-		// If the player didn't get simulated in the current frame then
-		// they didn't have a chance to touch this entity.
-		// Hence the touchlink could be broken and we only let the player check untouch.
-		int EFlags = GetEntData(g_aEntityLagData[i].iEntity, g_iEFlags);
-		EFlags &= ~EFL_CHECK_UNTOUCH;
-		SetEntData(g_aEntityLagData[i].iEntity, g_iEFlags, EFlags);
-
-		if(g_aEntityLagData[i].iDeleted)
-		{
-			if(g_aEntityLagData[i].iRecordsValid)
-			{
-				g_aEntityLagData[i].iRecordIndex++;
-
-				if(g_aEntityLagData[i].iRecordIndex >= MAX_RECORDS)
-					g_aEntityLagData[i].iRecordIndex = 0;
-
-				g_aEntityLagData[i].iRecordsValid--;
-			}
-
-			continue;
-		}
-
-		LagRecord TmpRecord;
-		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, TmpRecord);
-
-		// sleep detection
-		{
-			int iOldRecord = g_aEntityLagData[i].iRecordIndex;
-
-			if(CompareVectors(g_aaLagRecords[i][iOldRecord].vecAbsOrigin, TmpRecord.vecAbsOrigin) &&
-				CompareVectors(g_aaLagRecords[i][iOldRecord].angAbsRotation, TmpRecord.angAbsRotation))
-			{
-				g_aEntityLagData[i].iNotMoving++;
-
-#if defined DEBUG
-				if(g_aEntityLagData[i].iNotMoving == MAX_RECORDS)
-				{
-					char sClassname[64];
-					GetEntityClassname(g_aEntityLagData[i].iEntity, sClassname, sizeof(sClassname));
-
-					char sTargetname[64];
-					GetEntPropString(g_aEntityLagData[i].iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
-
-					int iHammerID = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "m_iHammerID");
-
-					PrintToBoth("[%d] entity %d (%s)\"%s\"(#%d) index %d GOING TO SLEEP", GetGameTickCount(), g_aEntityLagData[i].iEntity, sClassname, sTargetname, iHammerID, i);
-				}
-#endif
-			}
-			else
-			{
-#if defined DEBUG
-				if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
-				{
-					char sClassname[64];
-					GetEntityClassname(g_aEntityLagData[i].iEntity, sClassname, sizeof(sClassname));
-
-					char sTargetname[64];
-					GetEntPropString(g_aEntityLagData[i].iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
-
-					int iHammerID = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "m_iHammerID");
-
-					PrintToBoth("[%d] entity %d (%s)\"%s\"(#%d) index %d WAKING UP", GetGameTickCount(), g_aEntityLagData[i].iEntity, sClassname, sTargetname, iHammerID, i);
-				}
-#endif
-
-				g_aEntityLagData[i].iNotMoving = 0;
-			}
-
-			if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
-				continue;
-		}
-
-		g_aEntityLagData[i].iRecordIndex++;
-
-		if(g_aEntityLagData[i].iRecordIndex >= MAX_RECORDS)
-			g_aEntityLagData[i].iRecordIndex = 0;
-
-		if(g_aEntityLagData[i].iNumRecords < MAX_RECORDS)
-			g_aEntityLagData[i].iRecordsValid = ++g_aEntityLagData[i].iNumRecords;
-
-		LagRecord_Copy(g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex], TmpRecord);
-
-#if defined DEBUG
-		LogMessage("4 [%d] index %d, RECORD entity %d into %d", GetGameTickCount(), i, g_aEntityLagData[i].iEntity, g_aEntityLagData[i].iRecordIndex);
-		LogMessage("%f %f %f",
-			TmpRecord.vecOrigin[0],
-			TmpRecord.vecOrigin[1],
-			TmpRecord.vecOrigin[2]
-		);
-#endif
-	}
-}
-
-public MRESReturn Detour_OnFrameUpdatePostEntityThink()
-{
-	// VPhysics runs stuff again after QPhysics entity simulation so do this again...
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		int EFlags = GetEntData(g_aEntityLagData[i].iEntity, g_iEFlags);
-		EFlags &= ~EFL_CHECK_UNTOUCH;
-		SetEntData(g_aEntityLagData[i].iEntity, g_iEFlags, EFlags);
-	}
-}
-
-void RecordDataIntoRecord(int iEntity, LagRecord Record)
-{
-	// Force recalculation of all values
-	int EFlags = GetEntData(iEntity, g_iEFlags);
-	EFlags |= EFL_DIRTY_ABSTRANSFORM;
-	SetEntData(iEntity, g_iEFlags, EFlags);
-
-	SDKCall(g_hCalcAbsolutePosition, iEntity);
-
-	GetEntDataVector(iEntity, g_iVecOrigin, Record.vecOrigin);
-	GetEntDataVector(iEntity, g_iVecAbsOrigin, Record.vecAbsOrigin);
-	GetEntDataVector(iEntity, g_iAngRotation, Record.angRotation);
-	GetEntDataVector(iEntity, g_iAngAbsRotation, Record.angAbsRotation);
-	GetEntDataArray(iEntity, g_iCoordinateFrame, view_as<int>(Record.rgflCoordinateFrame), 14, 4);
-	Record.flSimulationTime = GetEntDataFloat(iEntity, g_iSimulationTime);
-}
-
-bool DoesRotationInvalidateSurroundingBox(int iEntity)
-{
-	int SolidFlags = GetEntData(iEntity, g_iSolidFlags);
-	if(SolidFlags & FSOLID_ROOT_PARENT_ALIGNED)
-		return true;
-
-	int SurroundType = GetEntData(iEntity, g_iSurroundType);
-	switch(SurroundType)
-	{
-		case USE_COLLISION_BOUNDS_NEVER_VPHYSICS,
-			 USE_OBB_COLLISION_BOUNDS,
-			 USE_BEST_COLLISION_BOUNDS:
-		{
-			// IsBoundsDefinedInEntitySpace()
-			int SolidType = GetEntData(iEntity, g_iSolidType);
-			return ((SolidFlags & FSOLID_FORCE_WORLD_ALIGNED) == 0) &&
-					(SolidType != SOLID_BBOX) && (SolidType != SOLID_NONE);
-		}
-
-		case USE_HITBOXES,
-			 USE_GAME_CODE:
-		{
-			return true;
-		}
-
-		case USE_ROTATION_EXPANDED_BOUNDS,
-			 USE_SPECIFIED_BOUNDS:
-		{
-			return false;
-		}
-
-		default:
-		{
-			return true;
-		}
-	}
-}
-
-void InvalidatePhysicsRecursive(int iEntity)
-{
-	// NetworkProp()->MarkPVSInformationDirty()
-	int fStateFlags = GetEdictFlags(iEntity);
-	fStateFlags |= FL_EDICT_DIRTY_PVS_INFORMATION;
-	SetEdictFlags(iEntity, fStateFlags);
-
-	// CollisionProp()->MarkPartitionHandleDirty();
-	Address CollisionProp = GetEntityAddress(iEntity) + view_as<Address>(g_iCollision);
-	SDKCall(g_hMarkPartitionHandleDirty, CollisionProp);
-
-	if(DoesRotationInvalidateSurroundingBox(iEntity))
-	{
-		// CollisionProp()->MarkSurroundingBoundsDirty();
-		int EFlags = GetEntData(iEntity, g_iEFlags);
-		EFlags |= EFL_DIRTY_SURROUNDING_COLLISION_BOUNDS;
-		SetEntData(iEntity, g_iEFlags, EFlags);
-	}
-}
-
-void RestoreEntityFromRecord(int iEntity, LagRecord Record)
-{
-	SetEntDataVector(iEntity, g_iVecOrigin, Record.vecOrigin);
-	SetEntDataVector(iEntity, g_iVecAbsOrigin, Record.vecAbsOrigin);
-	SetEntDataVector(iEntity, g_iAngRotation, Record.angRotation);
-	SetEntDataVector(iEntity, g_iAngAbsRotation, Record.angAbsRotation);
-	SetEntDataArray(iEntity, g_iCoordinateFrame, view_as<int>(Record.rgflCoordinateFrame), 14, 4);
-	SetEntDataFloat(iEntity, g_iSimulationTime, Record.flSimulationTime);
-
-	InvalidatePhysicsRecursive(iEntity);
-}
-
-bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
-{
-	if(g_bCleaningUp)
-		return false;
-
-	if(g_iNumEntities == MAX_ENTITIES)
-	{
-		char sClassname[64];
-		GetEntityClassname(iEntity, sClassname, sizeof(sClassname));
-
-		char sTargetname[64];
-		GetEntPropString(iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
-
-		int iHammerID = GetEntProp(iEntity, Prop_Data, "m_iHammerID");
-
-		PrintToBoth("[%d] OUT OF LAGCOMP SLOTS entity %d (%s)\"%s\"(#%d)", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID);
-		return false;
-	}
-
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		if(g_aEntityLagData[i].iEntity == iEntity)
-			return true;
-	}
-
-	int i = g_iNumEntities;
-	g_iNumEntities++;
-
-	g_aEntityLagData[i].iEntity = iEntity;
-	g_aEntityLagData[i].iRecordIndex = 0;
-	g_aEntityLagData[i].iNumRecords = 1;
-	g_aEntityLagData[i].iRecordsValid = 1;
-	g_aEntityLagData[i].iSpawned = GetGameTickCount();
-	g_aEntityLagData[i].iDeleted = 0;
-	g_aEntityLagData[i].iNotMoving = MAX_RECORDS;
-	g_aEntityLagData[i].bRestore = false;
-	g_aEntityLagData[i].bLateKill = bLateKill;
-	g_aEntityLagData[i].iTouchStamp = GetEntData(iEntity, g_iTouchStamp);
-
-	RecordDataIntoRecord(iEntity, g_aaLagRecords[i][0]);
-
-	{
-		char sClassname[64];
-		GetEntityClassname(iEntity, sClassname, sizeof(sClassname));
-
-		char sTargetname[64];
-		GetEntPropString(iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
-
-		int iHammerID = GetEntProp(iEntity, Prop_Data, "m_iHammerID");
-
-		PrintToBoth("[%d] added entity %d (%s)\"%s\"(#%d) under index %d", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID, i);
-	}
-
-	return true;
-}
-
-public void OnEntitySpawned(int entity, const char[] classname)
-{
-	if(g_bCleaningUp)
-		return;
-
-	if(entity < 0 || entity > MAX_EDICTS)
-		return;
-
-	if(!IsValidEntity(entity))
-		return;
-
-	bool bTrigger = StrEqual(classname, "trigger_hurt", false) ||
-					StrEqual(classname, "trigger_push", false) ||
-					StrEqual(classname, "trigger_teleport", false) ||
-					StrEqual(classname, "trigger_multiple", false);
-
-	bool bMoving = !strncmp(classname, "func_physbox", 12, false);
-
-	if(!bTrigger && !bMoving)
-		return;
-
-	// Don't lag compensate anything that could be parented to a player
-	// The player simulation would usually move the entity,
-	// but we would overwrite that position change by restoring the entity to its previous state.
-	int iParent = INVALID_ENT_REFERENCE;
-	char sParentClassname[64];
-	for(int iTmp = entity;;)
-	{
-		iTmp = GetEntPropEnt(iTmp, Prop_Data, "m_pParent");
-		if(iTmp == INVALID_ENT_REFERENCE)
-			break;
-
-		iParent = iTmp;
-		GetEntityClassname(iParent, sParentClassname, sizeof(sParentClassname));
-
-		if(StrEqual(sParentClassname, "player") ||
-			!strncmp(sParentClassname, "weapon_", 7))
-		{
-			return;
-		}
-	}
-
-	// Lag compensate all moving stuff
-	if(bMoving)
-	{
-		AddEntityForLagCompensation(entity, false);
-		return;
-	}
-
-	// Lag compensate all (non player-) parented hurt triggers
-	if(bTrigger && iParent > MaxClients && iParent < MAX_EDICTS)
-	{
-		if(AddEntityForLagCompensation(entity, true))
-		{
-			// Filter the trigger from being touched outside of the lag compensation
-			g_aBlockTriggerTouch[entity] = 1;
-		}
-	}
-}
-
-public void OnEntityDestroyed(int entity)
-{
-	if(g_bCleaningUp)
-		return;
-
-	if(entity < 0 || entity > MAX_EDICTS)
-		return;
-
-	if(!IsValidEntity(entity))
-		return;
-
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		if(g_aEntityLagData[i].iEntity != entity)
-			continue;
-
-		RemoveRecord(i);
-		return;
-	}
-}
-
-void RemoveRecord(int index)
-{
-	if(g_bCleaningUp)
-		return;
-
-	{
-		char sClassname[64];
-		GetEntityClassname(g_aEntityLagData[index].iEntity, sClassname, sizeof(sClassname));
-
-		char sTargetname[64];
-		GetEntPropString(g_aEntityLagData[index].iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
-
-		int iHammerID = GetEntProp(g_aEntityLagData[index].iEntity, Prop_Data, "m_iHammerID");
-
-		PrintToBoth("[%d] RemoveRecord %d / %d (%s)\"%s\"(#%d), num: %d", GetGameTickCount(), index, g_aEntityLagData[index].iEntity, sClassname, sTargetname, iHammerID, g_iNumEntities);
-	}
-
-	g_aBlockTriggerTouch[g_aEntityLagData[index].iEntity] = 0;
-
-	for(int client = 1; client <= MaxClients; client++)
-	{
-		g_aaBlockTouch[client][g_aEntityLagData[index].iEntity] = 0;
-	}
-
-	g_aEntityLagData[index].iEntity = INVALID_ENT_REFERENCE;
-
-	for(int src = index + 1; src < g_iNumEntities; src++)
-	{
-		int dest = src - 1;
-
-		EntityLagData_Copy(g_aEntityLagData[dest], g_aEntityLagData[src]);
-		g_aEntityLagData[src].iEntity = INVALID_ENT_REFERENCE;
-
-		int iNumRecords = g_aEntityLagData[dest].iNumRecords;
-		for(int i = 0; i < iNumRecords; i++)
-		{
-			LagRecord_Copy(g_aaLagRecords[dest][i], g_aaLagRecords[src][i]);
-		}
-	}
-
-	g_iNumEntities--;
-}
-
-void EntityLagData_Copy(EntityLagData obj, const EntityLagData other)
-{
-	obj.iEntity = other.iEntity;
-	obj.iRecordIndex = other.iRecordIndex;
-	obj.iNumRecords = other.iNumRecords;
-	obj.iRecordsValid = other.iRecordsValid;
-	obj.iSpawned = other.iSpawned;
-	obj.iDeleted = other.iDeleted;
-	obj.iNotMoving = other.iNotMoving;
-	obj.iTouchStamp = other.iTouchStamp;
-	obj.bRestore = other.bRestore;
-	obj.bLateKill = other.bLateKill;
-	LagRecord_Copy(obj.RestoreData, other.RestoreData);
-}
-
-void LagRecord_Copy(LagRecord obj, const LagRecord other)
-{
-	obj.vecOrigin[0] = other.vecOrigin[0];
-	obj.vecOrigin[1] = other.vecOrigin[1];
-	obj.vecOrigin[2] = other.vecOrigin[2];
-	obj.vecAbsOrigin[0] = other.vecAbsOrigin[0];
-	obj.vecAbsOrigin[1] = other.vecAbsOrigin[1];
-	obj.vecAbsOrigin[2] = other.vecAbsOrigin[2];
-	obj.angRotation[0] = other.angRotation[0];
-	obj.angRotation[1] = other.angRotation[1];
-	obj.angRotation[2] = other.angRotation[2];
-	obj.angAbsRotation[0] = other.angAbsRotation[0];
-	obj.angAbsRotation[1] = other.angAbsRotation[1];
-	obj.angAbsRotation[2] = other.angAbsRotation[2];
-	obj.flSimulationTime = other.flSimulationTime;
-
-	obj.rgflCoordinateFrame[0] = other.rgflCoordinateFrame[0];
-	obj.rgflCoordinateFrame[1] = other.rgflCoordinateFrame[1];
-	obj.rgflCoordinateFrame[2] = other.rgflCoordinateFrame[2];
-	obj.rgflCoordinateFrame[3] = other.rgflCoordinateFrame[3];
-	obj.rgflCoordinateFrame[4] = other.rgflCoordinateFrame[4];
-	obj.rgflCoordinateFrame[5] = other.rgflCoordinateFrame[5];
-	obj.rgflCoordinateFrame[6] = other.rgflCoordinateFrame[6];
-	obj.rgflCoordinateFrame[7] = other.rgflCoordinateFrame[7];
-	obj.rgflCoordinateFrame[8] = other.rgflCoordinateFrame[8];
-	obj.rgflCoordinateFrame[9] = other.rgflCoordinateFrame[9];
-	obj.rgflCoordinateFrame[10] = other.rgflCoordinateFrame[10];
-	obj.rgflCoordinateFrame[11] = other.rgflCoordinateFrame[11];
-	obj.rgflCoordinateFrame[12] = other.rgflCoordinateFrame[12];
-	obj.rgflCoordinateFrame[13] = other.rgflCoordinateFrame[13];
-}
-
-bool CompareVectors(const float vec1[3], const float vec2[3])
-{
-	return vec1[0] == vec2[0] && vec1[1] == vec2[1] && vec1[2] == vec2[2];
-}
 
 stock void PrintToBoth(const char[] format, any ...)
 {
