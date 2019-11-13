@@ -90,6 +90,7 @@ Handle g_hUTIL_Remove;
 Handle g_hRestartRound;
 Handle g_hSetTarget;
 Handle g_hSetTargetPost;
+Handle g_hFrameUpdatePostEntityThink;
 
 int g_iTouchStamp;
 int g_iCollision;
@@ -186,6 +187,20 @@ public void OnPluginStart()
 	{
 		delete hGameData;
 		SetFailState("Failed to detour CLogicMeasureMovement__SetTarget_post.");
+	}
+
+	// CEntityTouchManager::FrameUpdatePostEntityThink
+	g_hFrameUpdatePostEntityThink = DHookCreateFromConf(hGameData, "CEntityTouchManager__FrameUpdatePostEntityThink");
+	if(!g_hFrameUpdatePostEntityThink)
+	{
+		delete hGameData;
+		SetFailState("Failed to setup detour for CEntityTouchManager__FrameUpdatePostEntityThink");
+	}
+
+	if(!DHookEnableDetour(g_hFrameUpdatePostEntityThink, false, Detour_OnFrameUpdatePostEntityThink))
+	{
+		delete hGameData;
+		SetFailState("Failed to detour CEntityTouchManager__FrameUpdatePostEntityThink.");
 	}
 
 	delete hGameData;
@@ -437,6 +452,8 @@ public void OnMapStart()
 
 public void OnRunThinkFunctions(bool simulating)
 {
+	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, false);
+
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
 		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
@@ -684,8 +701,17 @@ public void OnRunThinkFunctionsPost(bool simulating)
 		);
 #endif
 	}
+}
 
-	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, false);
+public MRESReturn Detour_OnFrameUpdatePostEntityThink()
+{
+	// VPhysics runs stuff again after QPhysics entity simulation so do this again...
+	for(int i = 0; i < g_iNumEntities; i++)
+	{
+		int EFlags = GetEntData(g_aEntityLagData[i].iEntity, g_iEFlags);
+		EFlags &= ~EFL_CHECK_UNTOUCH;
+		SetEntData(g_aEntityLagData[i].iEntity, g_iEFlags, EFlags);
+	}
 }
 
 void RecordDataIntoRecord(int iEntity, LagRecord Record)

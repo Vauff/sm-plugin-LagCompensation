@@ -22,6 +22,12 @@
 				"linux"			"@_ZN21CLogicMeasureMovement9SetTargetEPKc"
 			}
 
+			"CEntityTouchManager::FrameUpdatePostEntityThink"
+			{
+				"library"		"server"
+				"linux"			"@_ZN19CEntityTouchManager26FrameUpdatePostEntityThinkEv"
+			}
+
 			"CalcAbsolutePosition"
 			{
 				"library"		"server"
@@ -54,6 +60,14 @@
 			"CCSGameRules__RestartRound"
 			{
 				"signature"		"CCSGameRules::RestartRound"
+				"callconv"		"thiscall"
+				"return"		"void"
+				"this"			"ignore"
+			}
+
+			"CEntityTouchManager__FrameUpdatePostEntityThink"
+			{
+				"signature"		"CEntityTouchManager::FrameUpdatePostEntityThink"
 				"callconv"		"thiscall"
 				"return"		"void"
 				"this"			"ignore"
