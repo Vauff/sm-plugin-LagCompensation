@@ -12,7 +12,7 @@ public Plugin myinfo =
 	name 			= "LagCompensation",
 	author 			= "BotoX",
 	description 	= "",
-	version 		= "0.2",
+	version 		= "1.0",
 	url 			= ""
 };
 
@@ -106,8 +106,8 @@ int g_iAngAbsRotation;
 int g_iSimulationTime;
 int g_iCoordinateFrame;
 
-char g_aBlockTriggerTouch[MAX_EDICTS] = {0, ...};
-char g_aaBlockTouch[MAXPLAYERS + 1][MAX_EDICTS];
+char g_aBlockTriggerTouch[MAX_EDICTS];
+char g_aaBlockTouch[(MAXPLAYERS + 1) * MAX_EDICTS];
 
 public void OnPluginStart()
 {
@@ -285,8 +285,8 @@ public void OnEntitySpawned(int entity, const char[] classname)
 
 	bool bTrigger = StrEqual(classname, "trigger_hurt", false) ||
 					StrEqual(classname, "trigger_push", false) ||
-					StrEqual(classname, "trigger_teleport", false) ||
-					StrEqual(classname, "trigger_multiple", false);
+					StrEqual(classname, "trigger_teleport", false);
+					//StrEqual(classname, "trigger_multiple", false);
 
 	bool bMoving = !strncmp(classname, "func_physbox", 12, false);
 
@@ -393,17 +393,19 @@ public MRESReturn Detour_OnRestartRound()
 
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
-		g_aBlockTriggerTouch[g_aEntityLagData[i].iEntity] = 0;
+		int iEntity = g_aEntityLagData[i].iEntity;
+
+		g_aBlockTriggerTouch[iEntity] = 0;
 
 		for(int client = 1; client <= MaxClients; client++)
 		{
-			g_aaBlockTouch[client][g_aEntityLagData[i].iEntity] = 0;
+			g_aaBlockTouch[client * MAX_EDICTS + iEntity] = 0;
 		}
 
 		if(g_aEntityLagData[i].iDeleted)
 		{
-			if(IsValidEntity(g_aEntityLagData[i].iEntity))
-				RemoveEdict(g_aEntityLagData[i].iEntity);
+			if(IsValidEntity(iEntity))
+				RemoveEdict(iEntity);
 		}
 
 		g_aEntityLagData[i].iEntity = INVALID_ENT_REFERENCE;
@@ -517,7 +519,10 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	if(!IsPlayerAlive(client))
 		return Plugin_Continue;
 
-	int iGameTick = GetGameTickCount();
+	// -1 because the newest record in the list is one tick old
+	// this is because we simulate players first
+	// hence no new entity record was inserted on the current tick
+	int iGameTick = GetGameTickCount() - 1;
 
 	int iDelta = iGameTick - tickcount;
 	if(iDelta < 0)
@@ -535,19 +540,19 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		// Entity too new, the client couldn't even see it yet.
 		if(g_aEntityLagData[i].iSpawned > iPlayerSimTick)
 		{
-			g_aaBlockTouch[client][iEntity] = 1;
+			g_aaBlockTouch[client * MAX_EDICTS + iEntity] = 1;
 			continue;
 		}
 		else if(g_aEntityLagData[i].iSpawned == iPlayerSimTick)
 		{
-			g_aaBlockTouch[client][iEntity] = 0;
+			g_aaBlockTouch[client * MAX_EDICTS + iEntity] = 0;
 		}
 
 		if(g_aEntityLagData[i].iDeleted)
 		{
 			if(g_aEntityLagData[i].iDeleted <= iPlayerSimTick)
 			{
-				g_aaBlockTouch[client][iEntity] = 1;
+				g_aaBlockTouch[client * MAX_EDICTS + iEntity] = 1;
 				continue;
 			}
 		}
@@ -555,19 +560,16 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
 			continue;
 
-		// +1 because the newest record in the list is one tick old
-		// this is because we simulate players first
-		// hence no new entity record was inserted on the current tick
-		iDelta += 1;
-		if(iDelta >= g_aEntityLagData[i].iNumRecords)
-			iDelta = g_aEntityLagData[i].iNumRecords - 1;
+		int iRecord = iDelta;
+		if(iRecord >= g_aEntityLagData[i].iNumRecords)
+			iRecord = g_aEntityLagData[i].iNumRecords - 1;
 
-		int iRecordIndex = g_aEntityLagData[i].iRecordIndex - iDelta;
+		int iRecordIndex = g_aEntityLagData[i].iRecordIndex - iRecord;
 		if(iRecordIndex < 0)
 			iRecordIndex += MAX_RECORDS;
 
 		RestoreEntityFromRecord(iEntity, g_aaLagRecords[i][iRecordIndex]);
-		g_aEntityLagData[i].bRestore |= !g_aEntityLagData[i].iDeleted;
+		g_aEntityLagData[i].bRestore = !g_aEntityLagData[i].iDeleted;
 	}
 
 	return Plugin_Continue;
@@ -792,6 +794,8 @@ void RemoveRecord(int index)
 	if(g_bCleaningUp)
 		return;
 
+	int iEntity = g_aEntityLagData[index].iEntity;
+
 	{
 		char sClassname[64];
 		GetEntityClassname(g_aEntityLagData[index].iEntity, sClassname, sizeof(sClassname));
@@ -804,11 +808,11 @@ void RemoveRecord(int index)
 		PrintToBoth("[%d] RemoveRecord %d / %d (%s)\"%s\"(#%d), num: %d", GetGameTickCount(), index, g_aEntityLagData[index].iEntity, sClassname, sTargetname, iHammerID, g_iNumEntities);
 	}
 
-	g_aBlockTriggerTouch[g_aEntityLagData[index].iEntity] = 0;
+	g_aBlockTriggerTouch[iEntity] = 0;
 
 	for(int client = 1; client <= MaxClients; client++)
 	{
-		g_aaBlockTouch[client][g_aEntityLagData[index].iEntity] = 0;
+		g_aaBlockTouch[client * MAX_EDICTS + iEntity] = 0;
 	}
 
 	g_aEntityLagData[index].iEntity = INVALID_ENT_REFERENCE;
@@ -916,7 +920,7 @@ public Action Command_CheckLagCompensated(int client, int argc)
 		bool bDeleted = false;
 		for(int j = 1; j <= MaxClients; j++)
 		{
-			if(g_aaBlockTouch[j][i])
+			if(g_aaBlockTouch[j * MAX_EDICTS + i])
 			{
 				bDeleted = true;
 				break;
