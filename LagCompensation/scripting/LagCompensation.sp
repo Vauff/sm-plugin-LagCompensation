@@ -92,7 +92,9 @@ Handle g_hRestartRound;
 Handle g_hSetTarget;
 Handle g_hSetTargetPost;
 Handle g_hFrameUpdatePostEntityThink;
+Handle g_hActivate;
 
+int g_iParent;
 int g_iTouchStamp;
 int g_iCollision;
 int g_iSolidFlags;
@@ -106,6 +108,7 @@ int g_iAngAbsRotation;
 int g_iSimulationTime;
 int g_iCoordinateFrame;
 
+int g_aLagCompensated[MAX_EDICTS] = {-1, ...};
 char g_aBlockTriggerTouch[MAX_EDICTS];
 char g_aaBlockTouch[(MAXPLAYERS + 1) * MAX_EDICTS];
 
@@ -206,6 +209,23 @@ public void OnPluginStart()
 
 	delete hGameData;
 
+
+	hGameData = LoadGameConfigFile("sdktools.games");
+	if(!hGameData)
+		SetFailState("Failed to load sdktools gamedata.");
+
+	int offset = GameConfGetOffset(hGameData, "Activate");
+	if (offset == -1)
+		SetFailState("Failed to find Activate offset");
+
+	// CPhysForce::Activate
+	g_hActivate = DHookCreate(offset, HookType_Entity, ReturnType_Void, ThisPointer_CBaseEntity, Hook_CPhysForce_Activate);
+	if(g_hActivate == INVALID_HANDLE)
+		SetFailState("Failed to DHookCreate Activate");
+
+	delete hGameData;
+
+
 	RegAdminCmd("sm_unlag", Command_AddLagCompensation, ADMFLAG_RCON, "sm_unlag <entidx>");
 	RegAdminCmd("sm_lagged", Command_CheckLagCompensated, ADMFLAG_GENERIC, "sm_lagged");
 
@@ -245,6 +265,7 @@ public void OnMapStart()
 
 	g_bCleaningUp = false;
 
+	g_iParent = FindDataMapInfo(0, "m_pParent");
 	g_iTouchStamp = FindDataMapInfo(0, "touchStamp");
 	g_iCollision = FindDataMapInfo(0, "m_Collision");
 	g_iSolidFlags = FindDataMapInfo(0, "m_usSolidFlags");
@@ -267,8 +288,27 @@ public void OnMapStart()
 		{
 			char sClassname[64];
 			if(GetEntityClassname(entity, sClassname, sizeof(sClassname)))
+			{
+				OnEntityCreated(entity, sClassname);
 				OnEntitySpawned(entity, sClassname);
+
+				if(StrEqual(sClassname, "phys_thruster", false))
+				{
+					Hook_CPhysForce_Activate(entity);
+				}
+			}
 		}
+	}
+}
+
+public void OnEntityCreated(int entity, const char[] classname)
+{
+	if(g_bCleaningUp)
+		return;
+
+	if(StrEqual(classname, "phys_thruster", false))
+	{
+		DHookEntity(g_hActivate, true, entity);
 	}
 }
 
@@ -277,21 +317,28 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	if(g_bCleaningUp)
 		return;
 
+	CheckEntityForLagComp(entity, classname);
+}
+
+bool CheckEntityForLagComp(int entity, const char[] classname, bool bRecursive=false, bool bGoodParents=false)
+{
 	if(entity < 0 || entity > MAX_EDICTS)
-		return;
+		return false;
 
 	if(!IsValidEntity(entity))
-		return;
+		return false;
+
+	if(g_aLagCompensated[entity] != -1)
+		return false;
 
 	bool bTrigger = StrEqual(classname, "trigger_hurt", false) ||
 					StrEqual(classname, "trigger_push", false) ||
 					StrEqual(classname, "trigger_teleport", false);
-					//StrEqual(classname, "trigger_multiple", false);
 
-	bool bMoving = !strncmp(classname, "func_physbox", 12, false);
+	bool bPhysbox = !strncmp(classname, "func_physbox", 12, false);
 
-	if(!bTrigger && !bMoving)
-		return;
+	if(!bTrigger && !bPhysbox)
+		return false;
 
 	// Don't lag compensate anything that could be parented to a player
 	// The player simulation would usually move the entity,
@@ -300,7 +347,7 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	char sParentClassname[64];
 	for(int iTmp = entity;;)
 	{
-		iTmp = GetEntPropEnt(iTmp, Prop_Data, "m_pParent");
+		iTmp = GetEntDataEnt2(iTmp, g_iParent);
 		if(iTmp == INVALID_ENT_REFERENCE)
 			break;
 
@@ -310,24 +357,56 @@ public void OnEntitySpawned(int entity, const char[] classname)
 		if(StrEqual(sParentClassname, "player") ||
 			!strncmp(sParentClassname, "weapon_", 7))
 		{
-			return;
+			return false;
+		}
+
+		if(g_aLagCompensated[iParent] != -1)
+		{
+			bGoodParents = true;
+			break;
+		}
+
+		if(strncmp(sParentClassname, "func_", 5))
+			continue;
+
+		if(StrEqual(sParentClassname[5], "movelinear") ||
+			StrEqual(sParentClassname[5], "door") ||
+			StrEqual(sParentClassname[5], "rotating") ||
+			StrEqual(sParentClassname[5], "tracktrain"))
+		{
+			bGoodParents = true;
+			break;
 		}
 	}
 
-	// Lag compensate all moving stuff
-	if(bMoving)
+	if(!bGoodParents)
+		return false;
+
+	if(AddEntityForLagCompensation(entity, bTrigger))
 	{
-		AddEntityForLagCompensation(entity, false);
-		return;
+		if(bRecursive)
+		{
+			CheckEntityChildrenForLagComp(entity);
+		}
+		return true;
 	}
 
-	// Lag compensate all (non player-) parented hurt triggers
-	if(bTrigger && iParent > MaxClients && iParent < MAX_EDICTS)
+	return false;
+}
+
+void CheckEntityChildrenForLagComp(int parent)
+{
+	int entity = INVALID_ENT_REFERENCE;
+	while((entity = FindEntityByClassname(entity, "*")) != INVALID_ENT_REFERENCE)
 	{
-		if(AddEntityForLagCompensation(entity, true))
+		if(GetEntDataEnt2(entity, g_iParent) != parent)
+			continue;
+
+		char sClassname[64];
+		if(GetEntityClassname(entity, sClassname, sizeof(sClassname)))
 		{
-			// Filter the trigger from being touched outside of the lag compensation
-			g_aBlockTriggerTouch[entity] = 1;
+			CheckEntityForLagComp(entity, sClassname, _, true);
+			CheckEntityChildrenForLagComp(entity);
 		}
 	}
 }
@@ -340,17 +419,11 @@ public void OnEntityDestroyed(int entity)
 	if(entity < 0 || entity > MAX_EDICTS)
 		return;
 
-	if(!IsValidEntity(entity))
+	int iIndex = g_aLagCompensated[entity];
+	if(iIndex == -1)
 		return;
 
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		if(g_aEntityLagData[i].iEntity != entity)
-			continue;
-
-		RemoveRecord(i);
-		return;
-	}
+	RemoveRecord(iIndex);
 }
 
 
@@ -363,28 +436,24 @@ public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
 	if(entity < 0 || entity > MAX_EDICTS)
 		return MRES_Ignored;
 
-	for(int i = 0; i < g_iNumEntities; i++)
+	int iIndex = g_aLagCompensated[entity];
+	if(iIndex == -1)
+		return MRES_Ignored;
+
+	// let it die
+	if(!g_aEntityLagData[iIndex].bLateKill)
+		return MRES_Ignored;
+
+	// ignore sleeping entities
+	if(g_aEntityLagData[iIndex].iNotMoving >= MAX_RECORDS)
+		return MRES_Ignored;
+
+	if(!g_aEntityLagData[iIndex].iDeleted)
 	{
-		if(g_aEntityLagData[i].iEntity != entity)
-			continue;
-
-		// let it die
-		if(!g_aEntityLagData[i].bLateKill)
-			break;
-
-		// ignore sleeping entities
-		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
-			break;
-
-		if(!g_aEntityLagData[i].iDeleted)
-		{
-			g_aEntityLagData[i].iDeleted = GetGameTickCount();
-		}
-
-		return MRES_Supercede;
+		g_aEntityLagData[iIndex].iDeleted = GetGameTickCount();
 	}
 
-	return MRES_Ignored;
+	return MRES_Supercede;
 }
 
 public MRESReturn Detour_OnRestartRound()
@@ -395,6 +464,7 @@ public MRESReturn Detour_OnRestartRound()
 	{
 		int iEntity = g_aEntityLagData[i].iEntity;
 
+		g_aLagCompensated[iEntity] = -1;
 		g_aBlockTriggerTouch[iEntity] = 0;
 
 		for(int client = 1; client <= MaxClients; client++)
@@ -434,18 +504,22 @@ public MRESReturn Detour_OnSetTargetPost(Handle hParams)
 	if(!GetEntityClassname(entity, sClassname, sizeof(sClassname)))
 		return MRES_Ignored;
 
-	if(!(StrEqual(sClassname, "trigger_hurt", false) ||
-		StrEqual(sClassname, "trigger_push", false) ||
-		StrEqual(sClassname, "trigger_teleport", false)))
-	{
-		return MRES_Ignored;
-	}
+	CheckEntityForLagComp(entity, sClassname, true, true);
 
-	if(AddEntityForLagCompensation(entity, true))
-	{
-		// Filter the trigger from being touched outside of the lag compensation
-		g_aBlockTriggerTouch[entity] = 1;
-	}
+	return MRES_Ignored;
+}
+
+public MRESReturn Hook_CPhysForce_Activate(int entity)
+{
+	int attachedObject = GetEntPropEnt(entity, Prop_Data, "m_attachedObject");
+	if(!IsValidEntity(attachedObject))
+		return MRES_Ignored;
+
+	char sClassname[64];
+	if(!GetEntityClassname(attachedObject, sClassname, sizeof(sClassname)))
+		return MRES_Ignored;
+
+	CheckEntityForLagComp(attachedObject, sClassname, true, true);
 
 	return MRES_Ignored;
 }
@@ -752,14 +826,13 @@ bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
 		return false;
 	}
 
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		if(g_aEntityLagData[i].iEntity == iEntity)
-			return true;
-	}
+	if(g_aLagCompensated[iEntity] != -1)
+		return false;
 
 	int i = g_iNumEntities;
 	g_iNumEntities++;
+
+	g_aLagCompensated[iEntity] = i;
 
 	g_aEntityLagData[i].iEntity = iEntity;
 	g_aEntityLagData[i].iRecordIndex = 0;
@@ -771,6 +844,9 @@ bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
 	g_aEntityLagData[i].bRestore = false;
 	g_aEntityLagData[i].bLateKill = bLateKill;
 	g_aEntityLagData[i].iTouchStamp = GetEntData(iEntity, g_iTouchStamp);
+
+	if(bLateKill)
+		g_aBlockTriggerTouch[iEntity] = 1;
 
 	RecordDataIntoRecord(iEntity, g_aaLagRecords[i][0]);
 
@@ -796,6 +872,7 @@ void RemoveRecord(int index)
 
 	int iEntity = g_aEntityLagData[index].iEntity;
 
+	if(IsValidEntity(iEntity))
 	{
 		char sClassname[64];
 		GetEntityClassname(g_aEntityLagData[index].iEntity, sClassname, sizeof(sClassname));
@@ -808,6 +885,7 @@ void RemoveRecord(int index)
 		PrintToBoth("[%d] RemoveRecord %d / %d (%s)\"%s\"(#%d), num: %d", GetGameTickCount(), index, g_aEntityLagData[index].iEntity, sClassname, sTargetname, iHammerID, g_iNumEntities);
 	}
 
+	g_aLagCompensated[iEntity] = -1;
 	g_aBlockTriggerTouch[iEntity] = 0;
 
 	for(int client = 1; client <= MaxClients; client++)
@@ -823,6 +901,7 @@ void RemoveRecord(int index)
 
 		EntityLagData_Copy(g_aEntityLagData[dest], g_aEntityLagData[src]);
 		g_aEntityLagData[src].iEntity = INVALID_ENT_REFERENCE;
+		g_aLagCompensated[g_aEntityLagData[dest].iEntity] = dest;
 
 		int iNumRecords = g_aEntityLagData[dest].iNumRecords;
 		for(int i = 0; i < iNumRecords; i++)
@@ -895,7 +974,6 @@ public Action Command_AddLagCompensation(int client, int argc)
 	}
 
 	AddEntityForLagCompensation(entity, late);
-	g_aBlockTriggerTouch[entity] = 1;
 
 	return Plugin_Handled;
 }
