@@ -4,6 +4,10 @@
 #include <CSSFixes>
 #include <dhooks>
 
+#define SetBit(%1,%2)		((%1)[(%2) >> 5] |= (1 << ((%2) & 31)))
+#define ClearBit(%1,%2)		((%1)[(%2) >> 5] &= ~(1 << ((%2) & 31)))
+#define CheckBit(%1,%2)		!!((%1)[(%2) >> 5] & (1 << ((%2) & 31)))
+
 #pragma semicolon 1
 #pragma newdecls required
 
@@ -48,6 +52,22 @@ enum
 	SOLID_CUSTOM		= 5,	// Always call into the entity for tests
 	SOLID_VPHYSICS		= 6,	// solid vphysics object, get vcollide from the model and collide with that
 	SOLID_LAST,
+};
+
+enum
+{
+	SF_TRIGGER_ALLOW_CLIENTS				= 0x01,		// Players can fire this trigger
+	SF_TRIGGER_ALLOW_NPCS					= 0x02,		// NPCS can fire this trigger
+	SF_TRIGGER_ALLOW_PUSHABLES				= 0x04,		// Pushables can fire this trigger
+	SF_TRIGGER_ALLOW_PHYSICS				= 0x08,		// Physics objects can fire this trigger
+	SF_TRIGGER_ONLY_PLAYER_ALLY_NPCS		= 0x10,		// *if* NPCs can fire this trigger, this flag means only player allies do so
+	SF_TRIGGER_ONLY_CLIENTS_IN_VEHICLES		= 0x20,		// *if* Players can fire this trigger, this flag means only players inside vehicles can
+	SF_TRIGGER_ALLOW_ALL					= 0x40,		// Everything can fire this trigger EXCEPT DEBRIS!
+	SF_TRIGGER_ONLY_CLIENTS_OUT_OF_VEHICLES	= 0x200,	// *if* Players can fire this trigger, this flag means only players outside vehicles can
+	SF_TRIG_PUSH_ONCE						= 0x80,		// trigger_push removes itself after firing once
+	SF_TRIG_PUSH_AFFECT_PLAYER_ON_LADDER	= 0x100,	// if pushed object is player on a ladder, then this disengages them from the ladder (HL2only)
+	SF_TRIG_TOUCH_DEBRIS 					= 0x400,	// Will touch physics debris objects
+	SF_TRIGGER_ONLY_NPCS_IN_VEHICLES		= 0x800,	// *if* NPCs can fire this trigger, only NPCs in vehicles do so (respects player ally flag too)
 };
 
 #define MAX_RECORDS 32
@@ -95,6 +115,7 @@ Handle g_hFrameUpdatePostEntityThink;
 Handle g_hActivate;
 
 int g_iParent;
+int g_iSpawnFlags;
 int g_iTouchStamp;
 int g_iCollision;
 int g_iSolidFlags;
@@ -109,8 +130,9 @@ int g_iSimulationTime;
 int g_iCoordinateFrame;
 
 int g_aLagCompensated[MAX_EDICTS] = {-1, ...};
-char g_aBlockTriggerTouch[MAX_EDICTS];
-char g_aaBlockTouch[(MAXPLAYERS + 1) * MAX_EDICTS];
+int g_aFilterTriggerTouch[MAX_EDICTS / 32];
+int g_aaFilterClientEntity[((MAXPLAYERS + 1) * MAX_EDICTS) / 32];
+int g_aBlockTriggerMoved[MAX_EDICTS / 32];
 
 public void OnPluginStart()
 {
@@ -229,7 +251,8 @@ public void OnPluginStart()
 	RegAdminCmd("sm_unlag", Command_AddLagCompensation, ADMFLAG_RCON, "sm_unlag <entidx>");
 	RegAdminCmd("sm_lagged", Command_CheckLagCompensated, ADMFLAG_GENERIC, "sm_lagged");
 
-	FilterClientEntityMap(g_aaBlockTouch, true);
+	FilterClientEntityMap(g_aaFilterClientEntity, true);
+	BlockTriggerMoved(g_aBlockTriggerMoved, true);
 }
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
@@ -241,8 +264,9 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 public void OnPluginEnd()
 {
 	g_bCleaningUp = true;
-	FilterClientEntityMap(g_aaBlockTouch, false);
-	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, false);
+	FilterClientEntityMap(g_aaFilterClientEntity, false);
+	BlockTriggerMoved(g_aBlockTriggerMoved, false);
+	FilterTriggerTouchPlayers(g_aFilterTriggerTouch, false);
 
 	DHookDisableDetour(g_hUTIL_Remove, false, Detour_OnUTIL_Remove);
 
@@ -266,6 +290,7 @@ public void OnMapStart()
 	g_bCleaningUp = false;
 
 	g_iParent = FindDataMapInfo(0, "m_pParent");
+	g_iSpawnFlags = FindDataMapInfo(0, "m_spawnflags");
 	g_iTouchStamp = FindDataMapInfo(0, "touchStamp");
 	g_iCollision = FindDataMapInfo(0, "m_Collision");
 	g_iSolidFlags = FindDataMapInfo(0, "m_usSolidFlags");
@@ -384,10 +409,18 @@ bool CheckEntityForLagComp(int entity, const char[] classname, bool bRecursive=f
 
 	if(AddEntityForLagCompensation(entity, bTrigger))
 	{
+		if(bTrigger)
+		{
+			int Flags = GetEntData(entity, g_iSpawnFlags);
+			if(!(Flags & (SF_TRIGGER_ALLOW_PUSHABLES | SF_TRIGGER_ALLOW_PHYSICS | SF_TRIGGER_ALLOW_ALL | SF_TRIG_TOUCH_DEBRIS)))
+				SetBit(g_aBlockTriggerMoved, entity);
+		}
+
 		if(bRecursive)
 		{
 			CheckEntityChildrenForLagComp(entity);
 		}
+
 		return true;
 	}
 
@@ -465,11 +498,12 @@ public MRESReturn Detour_OnRestartRound()
 		int iEntity = g_aEntityLagData[i].iEntity;
 
 		g_aLagCompensated[iEntity] = -1;
-		g_aBlockTriggerTouch[iEntity] = 0;
+		ClearBit(g_aFilterTriggerTouch, iEntity);
+		ClearBit(g_aBlockTriggerMoved, iEntity);
 
 		for(int client = 1; client <= MaxClients; client++)
 		{
-			g_aaBlockTouch[client * MAX_EDICTS + iEntity] = 0;
+			ClearBit(g_aaFilterClientEntity, client * MAX_EDICTS + iEntity);
 		}
 
 		if(g_aEntityLagData[i].iDeleted)
@@ -541,7 +575,7 @@ public MRESReturn Detour_OnFrameUpdatePostEntityThink()
 
 public void OnRunThinkFunctions(bool simulating)
 {
-	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, false);
+	FilterTriggerTouchPlayers(g_aFilterTriggerTouch, false);
 
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
@@ -614,19 +648,19 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		// Entity too new, the client couldn't even see it yet.
 		if(g_aEntityLagData[i].iSpawned > iPlayerSimTick)
 		{
-			g_aaBlockTouch[client * MAX_EDICTS + iEntity] = 1;
+			SetBit(g_aaFilterClientEntity, client * MAX_EDICTS + iEntity);
 			continue;
 		}
 		else if(g_aEntityLagData[i].iSpawned == iPlayerSimTick)
 		{
-			g_aaBlockTouch[client * MAX_EDICTS + iEntity] = 0;
+			ClearBit(g_aaFilterClientEntity, client * MAX_EDICTS + iEntity);
 		}
 
 		if(g_aEntityLagData[i].iDeleted)
 		{
 			if(g_aEntityLagData[i].iDeleted <= iPlayerSimTick)
 			{
-				g_aaBlockTouch[client * MAX_EDICTS + iEntity] = 1;
+				SetBit(g_aaFilterClientEntity, client * MAX_EDICTS + iEntity);
 				continue;
 			}
 		}
@@ -663,7 +697,7 @@ public void OnPostPlayerThinkFunctions()
 		g_aEntityLagData[i].bRestore = false;
 	}
 
-	FilterTriggerTouchPlayers(g_aBlockTriggerTouch, true);
+	FilterTriggerTouchPlayers(g_aFilterTriggerTouch, true);
 }
 
 public void OnRunThinkFunctionsPost(bool simulating)
@@ -846,7 +880,9 @@ bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
 	g_aEntityLagData[i].iTouchStamp = GetEntData(iEntity, g_iTouchStamp);
 
 	if(bLateKill)
-		g_aBlockTriggerTouch[iEntity] = 1;
+	{
+		SetBit(g_aFilterTriggerTouch, iEntity);
+	}
 
 	RecordDataIntoRecord(iEntity, g_aaLagRecords[i][0]);
 
@@ -886,11 +922,12 @@ void RemoveRecord(int index)
 	}
 
 	g_aLagCompensated[iEntity] = -1;
-	g_aBlockTriggerTouch[iEntity] = 0;
+	ClearBit(g_aFilterTriggerTouch, iEntity);
+	ClearBit(g_aBlockTriggerMoved, iEntity);
 
 	for(int client = 1; client <= MaxClients; client++)
 	{
-		g_aaBlockTouch[client * MAX_EDICTS + iEntity] = 0;
+		ClearBit(g_aaFilterClientEntity, client * MAX_EDICTS + iEntity);
 	}
 
 	g_aEntityLagData[index].iEntity = INVALID_ENT_REFERENCE;
@@ -998,14 +1035,14 @@ public Action Command_CheckLagCompensated(int client, int argc)
 		bool bDeleted = false;
 		for(int j = 1; j <= MaxClients; j++)
 		{
-			if(g_aaBlockTouch[j * MAX_EDICTS + i])
+			if(CheckBit(g_aaFilterClientEntity, j * MAX_EDICTS + i))
 			{
 				bDeleted = true;
 				break;
 			}
 		}
 
-		if(g_aBlockTriggerTouch[i] || bDeleted)
+		if(CheckBit(g_aFilterTriggerTouch, i) || bDeleted)
 		{
 			int index = -1;
 			for(int j = 0; j < g_iNumEntities; j++)
@@ -1028,7 +1065,7 @@ public Action Command_CheckLagCompensated(int client, int argc)
 				iHammerID = GetEntProp(i, Prop_Data, "m_iHammerID");
 			}
 
-			bool bBlockPhysics = g_aBlockTriggerTouch[i];
+			bool bBlockPhysics = CheckBit(g_aFilterTriggerTouch, i);
 			PrintToConsole(client, "%2d. #%d %s \"%s\" (#%d) -> BlockPhysics: %d / Deleted: %d", index, i, sClassname, sTargetname, iHammerID, bBlockPhysics, bDeleted);
 		}
 	}
