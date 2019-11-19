@@ -113,6 +113,7 @@ Handle g_hSetTarget;
 Handle g_hSetTargetPost;
 Handle g_hFrameUpdatePostEntityThink;
 Handle g_hActivate;
+Handle g_hAcceptInput;
 
 int g_iParent;
 int g_iSpawnFlags;
@@ -133,6 +134,7 @@ int g_aLagCompensated[MAX_EDICTS] = {-1, ...};
 int g_aFilterTriggerTouch[MAX_EDICTS / 32];
 int g_aaFilterClientEntity[((MAXPLAYERS + 1) * MAX_EDICTS) / 32];
 int g_aBlockTriggerMoved[MAX_EDICTS / 32];
+int g_aBlacklisted[MAX_EDICTS / 32];
 
 public void OnPluginStart()
 {
@@ -237,13 +239,28 @@ public void OnPluginStart()
 		SetFailState("Failed to load sdktools gamedata.");
 
 	int offset = GameConfGetOffset(hGameData, "Activate");
-	if (offset == -1)
+	if(offset == -1)
 		SetFailState("Failed to find Activate offset");
 
 	// CPhysForce::Activate
 	g_hActivate = DHookCreate(offset, HookType_Entity, ReturnType_Void, ThisPointer_CBaseEntity, Hook_CPhysForce_Activate);
 	if(g_hActivate == INVALID_HANDLE)
 		SetFailState("Failed to DHookCreate Activate");
+
+	offset = GameConfGetOffset(hGameData, "AcceptInput");
+	if(offset == -1)
+		SetFailState("Failed to find AcceptInput offset.");
+
+	// CBaseEntity::AcceptInput( const char *szInputName, CBaseEntity *pActivator, CBaseEntity *pCaller, variant_t Value, int outputID )
+	g_hAcceptInput = DHookCreate(offset, HookType_Entity, ReturnType_Bool, ThisPointer_CBaseEntity, OnAcceptInput);
+	if(g_hAcceptInput == INVALID_HANDLE)
+		SetFailState("Failed to DHook AcceptInput.");
+
+	DHookAddParam(g_hAcceptInput, HookParamType_CharPtr);
+	DHookAddParam(g_hAcceptInput, HookParamType_CBaseEntity);
+	DHookAddParam(g_hAcceptInput, HookParamType_CBaseEntity);
+	DHookAddParam(g_hAcceptInput, HookParamType_Object, 20, DHookPass_ByVal|DHookPass_ODTOR|DHookPass_OCTOR|DHookPass_OASSIGNOP); // variant_t is a union of 12 (float[3]) plus two int type params 12 + 8 = 20
+	DHookAddParam(g_hAcceptInput, HookParamType_Int);
 
 	delete hGameData;
 
@@ -285,7 +302,6 @@ public void OnPluginEnd()
 public void OnMapStart()
 {
 	bool bLate = g_bLateLoad;
-	g_bLateLoad = false;
 
 	g_bCleaningUp = false;
 
@@ -324,6 +340,8 @@ public void OnMapStart()
 			}
 		}
 	}
+
+	g_bLateLoad = false;
 }
 
 public void OnEntityCreated(int entity, const char[] classname)
@@ -335,6 +353,10 @@ public void OnEntityCreated(int entity, const char[] classname)
 	{
 		DHookEntity(g_hActivate, true, entity);
 	}
+	else if(StrEqual(classname, "game_ui", false))
+	{
+		DHookEntity(g_hAcceptInput, true, entity);
+	}
 }
 
 public void OnEntitySpawned(int entity, const char[] classname)
@@ -343,6 +365,75 @@ public void OnEntitySpawned(int entity, const char[] classname)
 		return;
 
 	CheckEntityForLagComp(entity, classname);
+}
+
+public MRESReturn OnAcceptInput(int entity, Handle hReturn, Handle hParams)
+{
+	if(!IsValidEntity(entity))
+		return MRES_Ignored;
+
+	char sCommand[128];
+	DHookGetParamString(hParams, 1, sCommand, sizeof(sCommand));
+
+	if(!StrEqual(sCommand, "Activate", false))
+		return MRES_Ignored;
+
+	if(DHookIsNullParam(hParams, 3))
+		return MRES_Ignored;
+
+	int iCaller = DHookGetParam(hParams, 3);
+	if(iCaller <= 0 || iCaller >= MAX_EDICTS)
+		return MRES_Ignored;
+
+	// Don't lagcompensate anything that has a game_ui button in their hierarchy.
+	BlacklistFamily(iCaller);
+
+	return MRES_Ignored;
+}
+
+void BlacklistFamily(int entity)
+{
+	if(entity > 0 && entity < MAX_EDICTS)
+	{
+		SetBit(g_aBlacklisted, entity);
+		RemoveEntityFromLagCompensation(entity);
+	}
+
+	// Blacklist children of this entity
+	BlacklistChildren(entity);
+
+	// And blacklist all parents and their children
+	for(;;)
+	{
+		entity = GetEntDataEnt2(entity, g_iParent);
+		if(entity == INVALID_ENT_REFERENCE)
+			break;
+
+		if(entity > 0 && entity < MAX_EDICTS)
+		{
+			SetBit(g_aBlacklisted, entity);
+			RemoveEntityFromLagCompensation(entity);
+		}
+
+		// And their children
+		BlacklistChildren(entity);
+	}
+}
+
+void BlacklistChildren(int parent)
+{
+	int entity = INVALID_ENT_REFERENCE;
+	while((entity = FindEntityByClassname(entity, "*")) != INVALID_ENT_REFERENCE)
+	{
+		if(GetEntDataEnt2(entity, g_iParent) != parent)
+			continue;
+
+		if(entity > 0 && entity < MAX_EDICTS)
+		{
+			SetBit(g_aBlacklisted, entity);
+			RemoveEntityFromLagCompensation(entity);
+		}
+	}
 }
 
 bool CheckEntityForLagComp(int entity, const char[] classname, bool bRecursive=false, bool bGoodParents=false)
@@ -362,7 +453,9 @@ bool CheckEntityForLagComp(int entity, const char[] classname, bool bRecursive=f
 
 	bool bPhysbox = !strncmp(classname, "func_physbox", 12, false);
 
-	if(!bTrigger && !bPhysbox)
+	bool bBlacklisted = CheckBit(g_aBlacklisted, entity);
+
+	if(!bTrigger && !bPhysbox || bBlacklisted)
 		return false;
 
 	// Don't lag compensate anything that could be parented to a player
@@ -381,6 +474,11 @@ bool CheckEntityForLagComp(int entity, const char[] classname, bool bRecursive=f
 
 		if(StrEqual(sParentClassname, "player") ||
 			!strncmp(sParentClassname, "weapon_", 7))
+		{
+			return false;
+		}
+
+		if(CheckBit(g_aBlacklisted, entity))
 		{
 			return false;
 		}
@@ -452,6 +550,8 @@ public void OnEntityDestroyed(int entity)
 	if(entity < 0 || entity > MAX_EDICTS)
 		return;
 
+	ClearBit(g_aBlacklisted, entity);
+
 	int iIndex = g_aLagCompensated[entity];
 	if(iIndex == -1)
 		return;
@@ -514,6 +614,9 @@ public MRESReturn Detour_OnRestartRound()
 
 		g_aEntityLagData[i].iEntity = INVALID_ENT_REFERENCE;
 	}
+
+	for(int i = 0; i < sizeof(g_aBlacklisted); i++)
+		g_aBlacklisted[i] = 0;
 
 	g_iNumEntities = 0;
 
@@ -901,6 +1004,16 @@ bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
 	return true;
 }
 
+bool RemoveEntityFromLagCompensation(int iEntity)
+{
+	int index = g_aLagCompensated[iEntity];
+	if(index == -1)
+		return false;
+
+	RemoveRecord(index);
+	return true;
+}
+
 void RemoveRecord(int index)
 {
 	if(g_bCleaningUp)
@@ -1017,37 +1130,46 @@ public Action Command_AddLagCompensation(int client, int argc)
 
 public Action Command_CheckLagCompensated(int client, int argc)
 {
-	for(int i = 0; i < g_iNumEntities; i++)
+	if(argc == 0)
 	{
-		char sClassname[64];
-		GetEntityClassname(g_aEntityLagData[i].iEntity, sClassname, sizeof(sClassname));
+		for(int i = 0; i < g_iNumEntities; i++)
+		{
+			char sClassname[64];
+			GetEntityClassname(g_aEntityLagData[i].iEntity, sClassname, sizeof(sClassname));
 
-		char sTargetname[64];
-		GetEntPropString(g_aEntityLagData[i].iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+			char sTargetname[64];
+			GetEntPropString(g_aEntityLagData[i].iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
 
-		int iHammerID = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "m_iHammerID");
+			int iHammerID = GetEntProp(g_aEntityLagData[i].iEntity, Prop_Data, "m_iHammerID");
 
-		PrintToConsole(client, "%2d. #%d %s \"%s\" (#%d)", i, g_aEntityLagData[i].iEntity, sClassname, sTargetname, iHammerID);
+			PrintToConsole(client, "%2d. #%d %s \"%s\" (#%d)", i, g_aEntityLagData[i].iEntity, sClassname, sTargetname, iHammerID);
+		}
+
+		return Plugin_Handled;
 	}
 
-	for(int i = 0; i < MAX_EDICTS; i++)
+	for(int iEntity = 0; iEntity < MAX_EDICTS; iEntity++)
 	{
 		bool bDeleted = false;
 		for(int j = 1; j <= MaxClients; j++)
 		{
-			if(CheckBit(g_aaFilterClientEntity, j * MAX_EDICTS + i))
+			if(CheckBit(g_aaFilterClientEntity, j * MAX_EDICTS + iEntity))
 			{
 				bDeleted = true;
 				break;
 			}
 		}
 
-		if(CheckBit(g_aFilterTriggerTouch, i) || bDeleted)
+		bool bBlockPhysics = CheckBit(g_aFilterTriggerTouch, iEntity);
+		bool bBlockTriggerMoved = CheckBit(g_aBlockTriggerMoved, iEntity);
+		bool bBlacklisted = CheckBit(g_aBlacklisted, iEntity);
+
+		if(bDeleted || bBlockPhysics || bBlockTriggerMoved || bBlacklisted)
 		{
 			int index = -1;
 			for(int j = 0; j < g_iNumEntities; j++)
 			{
-				if(g_aEntityLagData[j].iEntity == i)
+				if(g_aEntityLagData[j].iEntity == iEntity)
 				{
 					index = j;
 					break;
@@ -1058,15 +1180,15 @@ public Action Command_CheckLagCompensated(int client, int argc)
 			char sTargetname[64] = "INVALID";
 			int iHammerID = -1;
 
-			if(IsValidEntity(i))
+			if(IsValidEntity(iEntity))
 			{
-				GetEntityClassname(i, sClassname, sizeof(sClassname));
-				GetEntPropString(i, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
-				iHammerID = GetEntProp(i, Prop_Data, "m_iHammerID");
+				GetEntityClassname(iEntity, sClassname, sizeof(sClassname));
+				GetEntPropString(iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+				iHammerID = GetEntProp(iEntity, Prop_Data, "m_iHammerID");
 			}
 
-			bool bBlockPhysics = CheckBit(g_aFilterTriggerTouch, i);
-			PrintToConsole(client, "%2d. #%d %s \"%s\" (#%d) -> BlockPhysics: %d / Deleted: %d", index, i, sClassname, sTargetname, iHammerID, bBlockPhysics, bDeleted);
+			PrintToConsole(client, "%2d. #%d %s \"%s\" (#%d) -> Phys: %d / TrigMov: %d / Deleted: %d / Black: %d",
+				index, iEntity, sClassname, sTargetname, iHammerID, bBlockPhysics, bBlockTriggerMoved, bDeleted, bBlacklisted);
 		}
 	}
 
