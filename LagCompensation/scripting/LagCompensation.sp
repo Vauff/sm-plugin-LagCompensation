@@ -70,6 +70,8 @@ enum
 	SF_TRIGGER_ONLY_NPCS_IN_VEHICLES		= 0x800,	// *if* NPCs can fire this trigger, only NPCs in vehicles do so (respects player ally flag too)
 };
 
+#define SF_LAGCOMP_DISABLE (1 << 30)
+
 #define MAX_RECORDS 32
 #define MAX_ENTITIES 256
 //#define DEBUG
@@ -447,6 +449,10 @@ bool CheckEntityForLagComp(int entity, const char[] classname, bool bRecursive=f
 	if(g_aLagCompensated[entity] != -1)
 		return false;
 
+	int SpawnFlags = GetEntData(entity, g_iSpawnFlags);
+	if(SpawnFlags & SF_LAGCOMP_DISABLE)
+		return false;
+
 	bool bTrigger = StrEqual(classname, "trigger_hurt", false) ||
 					StrEqual(classname, "trigger_push", false) ||
 					StrEqual(classname, "trigger_teleport", false);
@@ -509,8 +515,7 @@ bool CheckEntityForLagComp(int entity, const char[] classname, bool bRecursive=f
 	{
 		if(bTrigger)
 		{
-			int Flags = GetEntData(entity, g_iSpawnFlags);
-			if(!(Flags & (SF_TRIGGER_ALLOW_PUSHABLES | SF_TRIGGER_ALLOW_PHYSICS | SF_TRIGGER_ALLOW_ALL | SF_TRIG_TOUCH_DEBRIS)))
+			if(!(SpawnFlags & (SF_TRIGGER_ALLOW_PUSHABLES | SF_TRIGGER_ALLOW_PHYSICS | SF_TRIGGER_ALLOW_ALL | SF_TRIG_TOUCH_DEBRIS)))
 				SetBit(g_aBlockTriggerMoved, entity);
 		}
 
