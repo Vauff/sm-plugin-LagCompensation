@@ -21,6 +21,7 @@ public Plugin myinfo =
 };
 
 bool g_bLateLoad = false;
+bool g_bHasCSSFixes = true;
 
 // Don't change this.
 #define MAX_EDICTS 2048
@@ -280,12 +281,21 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	return APLRes_Success;
 }
 
+public void OnLibraryRemoved(const char[] name)
+{
+	if(StrEqual(name, "CSSFixes"))
+		g_bHasCSSFixes = false;
+}
+
 public void OnPluginEnd()
 {
 	g_bCleaningUp = true;
-	FilterClientEntityMap(g_aaFilterClientEntity, false);
-	BlockTriggerMoved(g_aBlockTriggerMoved, false);
-	FilterTriggerTouchPlayers(g_aFilterTriggerTouch, false);
+	if(g_bHasCSSFixes)
+	{
+		FilterClientEntityMap(g_aaFilterClientEntity, false);
+		BlockTriggerMoved(g_aBlockTriggerMoved, false);
+		FilterTriggerTouchPlayers(g_aFilterTriggerTouch, false);
+	}
 
 	DHookDisableDetour(g_hUTIL_Remove, false, Detour_OnUTIL_Remove);
 
