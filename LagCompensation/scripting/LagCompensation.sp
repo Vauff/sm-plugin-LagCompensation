@@ -1,7 +1,7 @@
 #include <sourcemod>
 #include <sdkhooks>
 #include <sdktools>
-#include <CSSFixes>
+#include <PhysHooks>
 #include <dhooks>
 
 #define SetBit(%1,%2)		((%1)[(%2) >> 5] |= (1 << ((%2) & 31)))
@@ -21,7 +21,7 @@ public Plugin myinfo =
 };
 
 bool g_bLateLoad = false;
-bool g_bHasCSSFixes = true;
+bool g_bHasPhysHooks = true;
 
 // Don't change this.
 #define MAX_EDICTS 2048
@@ -134,8 +134,8 @@ int g_iSimulationTime;
 int g_iCoordinateFrame;
 
 int g_aLagCompensated[MAX_EDICTS] = {-1, ...};
-int g_aFilterTriggerTouch[MAX_EDICTS / 32];
-int g_aaFilterClientEntity[((MAXPLAYERS + 1) * MAX_EDICTS) / 32];
+int g_aBlockTriggerTouchPlayers[MAX_EDICTS / 32];
+int g_aaFilterClientSolidTouch[((MAXPLAYERS + 1) * MAX_EDICTS) / 32];
 int g_aBlockTriggerMoved[MAX_EDICTS / 32];
 int g_aBlacklisted[MAX_EDICTS / 32];
 
@@ -271,7 +271,7 @@ public void OnPluginStart()
 	RegAdminCmd("sm_unlag", Command_AddLagCompensation, ADMFLAG_RCON, "sm_unlag <entidx>");
 	RegAdminCmd("sm_lagged", Command_CheckLagCompensated, ADMFLAG_GENERIC, "sm_lagged");
 
-	FilterClientEntityMap(g_aaFilterClientEntity, true);
+	FilterClientSolidTouch(g_aaFilterClientSolidTouch, true);
 	BlockTriggerMoved(g_aBlockTriggerMoved, true);
 }
 
@@ -283,18 +283,18 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 
 public void OnLibraryRemoved(const char[] name)
 {
-	if(StrEqual(name, "CSSFixes"))
-		g_bHasCSSFixes = false;
+	if(StrEqual(name, "PhysHooks"))
+		g_bHasPhysHooks = false;
 }
 
 public void OnPluginEnd()
 {
 	g_bCleaningUp = true;
-	if(g_bHasCSSFixes)
+	if(g_bHasPhysHooks)
 	{
-		FilterClientEntityMap(g_aaFilterClientEntity, false);
+		FilterClientSolidTouch(g_aaFilterClientSolidTouch, false);
 		BlockTriggerMoved(g_aBlockTriggerMoved, false);
-		FilterTriggerTouchPlayers(g_aFilterTriggerTouch, false);
+		BlockTriggerTouchPlayers(g_aBlockTriggerTouchPlayers, false);
 	}
 
 	DHookDisableDetour(g_hUTIL_Remove, false, Detour_OnUTIL_Remove);
@@ -613,12 +613,12 @@ public MRESReturn Detour_OnRestartRound()
 		int iEntity = g_aEntityLagData[i].iEntity;
 
 		g_aLagCompensated[iEntity] = -1;
-		ClearBit(g_aFilterTriggerTouch, iEntity);
+		ClearBit(g_aBlockTriggerTouchPlayers, iEntity);
 		ClearBit(g_aBlockTriggerMoved, iEntity);
 
 		for(int client = 1; client <= MaxClients; client++)
 		{
-			ClearBit(g_aaFilterClientEntity, client * MAX_EDICTS + iEntity);
+			ClearBit(g_aaFilterClientSolidTouch, client * MAX_EDICTS + iEntity);
 		}
 
 		if(g_aEntityLagData[i].iDeleted)
@@ -693,7 +693,7 @@ public MRESReturn Detour_OnFrameUpdatePostEntityThink()
 
 public void OnRunThinkFunctions(bool simulating)
 {
-	FilterTriggerTouchPlayers(g_aFilterTriggerTouch, false);
+	BlockTriggerTouchPlayers(g_aBlockTriggerTouchPlayers, false);
 
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
@@ -766,19 +766,19 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		// Entity too new, the client couldn't even see it yet.
 		if(g_aEntityLagData[i].iSpawned > iPlayerSimTick)
 		{
-			SetBit(g_aaFilterClientEntity, client * MAX_EDICTS + iEntity);
+			SetBit(g_aaFilterClientSolidTouch, client * MAX_EDICTS + iEntity);
 			continue;
 		}
 		else if(g_aEntityLagData[i].iSpawned == iPlayerSimTick)
 		{
-			ClearBit(g_aaFilterClientEntity, client * MAX_EDICTS + iEntity);
+			ClearBit(g_aaFilterClientSolidTouch, client * MAX_EDICTS + iEntity);
 		}
 
 		if(g_aEntityLagData[i].iDeleted)
 		{
 			if(g_aEntityLagData[i].iDeleted <= iPlayerSimTick)
 			{
-				SetBit(g_aaFilterClientEntity, client * MAX_EDICTS + iEntity);
+				SetBit(g_aaFilterClientSolidTouch, client * MAX_EDICTS + iEntity);
 				continue;
 			}
 		}
@@ -815,7 +815,7 @@ public void OnPostPlayerThinkFunctions()
 		g_aEntityLagData[i].bRestore = false;
 	}
 
-	FilterTriggerTouchPlayers(g_aFilterTriggerTouch, true);
+	BlockTriggerTouchPlayers(g_aBlockTriggerTouchPlayers, true);
 }
 
 public void OnRunThinkFunctionsPost(bool simulating)
@@ -999,7 +999,7 @@ bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
 
 	if(bLateKill)
 	{
-		SetBit(g_aFilterTriggerTouch, iEntity);
+		SetBit(g_aBlockTriggerTouchPlayers, iEntity);
 	}
 
 	RecordDataIntoRecord(iEntity, g_aaLagRecords[i][0]);
@@ -1050,12 +1050,12 @@ void RemoveRecord(int index)
 	}
 
 	g_aLagCompensated[iEntity] = -1;
-	ClearBit(g_aFilterTriggerTouch, iEntity);
+	ClearBit(g_aBlockTriggerTouchPlayers, iEntity);
 	ClearBit(g_aBlockTriggerMoved, iEntity);
 
 	for(int client = 1; client <= MaxClients; client++)
 	{
-		ClearBit(g_aaFilterClientEntity, client * MAX_EDICTS + iEntity);
+		ClearBit(g_aaFilterClientSolidTouch, client * MAX_EDICTS + iEntity);
 	}
 
 	g_aEntityLagData[index].iEntity = INVALID_ENT_REFERENCE;
@@ -1168,14 +1168,14 @@ public Action Command_CheckLagCompensated(int client, int argc)
 		bool bDeleted = false;
 		for(int j = 1; j <= MaxClients; j++)
 		{
-			if(CheckBit(g_aaFilterClientEntity, j * MAX_EDICTS + iEntity))
+			if(CheckBit(g_aaFilterClientSolidTouch, j * MAX_EDICTS + iEntity))
 			{
 				bDeleted = true;
 				break;
 			}
 		}
 
-		bool bBlockPhysics = CheckBit(g_aFilterTriggerTouch, iEntity);
+		bool bBlockPhysics = CheckBit(g_aBlockTriggerTouchPlayers, iEntity);
 		bool bBlockTriggerMoved = CheckBit(g_aBlockTriggerMoved, iEntity);
 		bool bBlacklisted = CheckBit(g_aBlacklisted, iEntity);
 
