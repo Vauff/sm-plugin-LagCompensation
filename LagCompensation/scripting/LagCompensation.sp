@@ -3,6 +3,9 @@
 #include <sdktools>
 #include <PhysHooks>
 #include <dhooks>
+#include <clientprefs>
+
+#define PLUGIN_VERSION "1.0.1"
 
 #define SetBit(%1,%2)		((%1)[(%2) >> 5] |= (1 << ((%2) & 31)))
 #define ClearBit(%1,%2)		((%1)[(%2) >> 5] &= ~(1 << ((%2) & 31)))
@@ -16,7 +19,7 @@ public Plugin myinfo =
 	name 			= "LagCompensation",
 	author 			= "BotoX",
 	description 	= "",
-	version 		= "1.0",
+	version 		= PLUGIN_VERSION,
 	url 			= ""
 };
 
@@ -75,7 +78,6 @@ enum
 
 #define MAX_RECORDS 32
 #define MAX_ENTITIES 256
-//#define DEBUG
 
 enum struct LagRecord
 {
@@ -96,7 +98,6 @@ enum struct EntityLagData
 	int iSpawned;
 	int iDeleted;
 	int iNotMoving;
-	int iTouchStamp;
 	bool bRestore;
 	bool bLateKill;
 	LagRecord RestoreData;
@@ -106,6 +107,8 @@ LagRecord g_aaLagRecords[MAX_ENTITIES][MAX_RECORDS];
 EntityLagData g_aEntityLagData[MAX_ENTITIES];
 int g_iNumEntities = 0;
 bool g_bCleaningUp = true;
+
+bool g_bHasOnEntitySpawned = false;
 
 Handle g_hCalcAbsolutePosition;
 Handle g_hMarkPartitionHandleDirty;
@@ -118,14 +121,16 @@ Handle g_hFrameUpdatePostEntityThink;
 Handle g_hActivate;
 Handle g_hAcceptInput;
 
+int g_iNetworkableOuter;
 int g_iParent;
 int g_iSpawnFlags;
-int g_iTouchStamp;
 int g_iCollision;
 int g_iSolidFlags;
 int g_iSolidType;
 int g_iSurroundType;
 int g_iEFlags;
+int g_iLerpTime = -1;
+
 int g_iVecOrigin;
 int g_iVecAbsOrigin;
 int g_iAngRotation;
@@ -139,8 +144,14 @@ int g_aaFilterClientSolidTouch[((MAXPLAYERS + 1) * MAX_EDICTS) / 32];
 int g_aBlockTriggerMoved[MAX_EDICTS / 32];
 int g_aBlacklisted[MAX_EDICTS / 32];
 
+Handle g_hCookie_DisableLagComp;
+bool g_bDisableLagComp[MAXPLAYERS+1];
+int g_iDisableLagComp[MAXPLAYERS+1];
+
 public void OnPluginStart()
 {
+	CreateConVar("sm_lagcomp_version", PLUGIN_VERSION, "LagCompensation Version", FCVAR_SPONLY|FCVAR_NOTIFY|FCVAR_DONTRECORD).SetString(PLUGIN_VERSION);
+
 	Handle hGameData = LoadGameConfigFile("LagCompensation.games");
 	if(!hGameData)
 		SetFailState("Failed to load LagCompensation gamedata.");
@@ -234,6 +245,14 @@ public void OnPluginStart()
 		SetFailState("Failed to detour CEntityTouchManager__FrameUpdatePostEntityThink.");
 	}
 
+
+	g_iNetworkableOuter = GameConfGetOffset(hGameData, "CServerNetworkableProperty::m_pOuter");
+	if(g_iNetworkableOuter == -1)
+	{
+		delete hGameData;
+		SetFailState("GameConfGetOffset(hGameData, \"CServerNetworkableProperty::m_pOuter\") failed!");
+	}
+
 	delete hGameData;
 
 
@@ -267,6 +286,14 @@ public void OnPluginStart()
 
 	delete hGameData;
 
+	g_bHasOnEntitySpawned = GetFeatureStatus(FeatureType_Capability, "SDKHook_OnEntitySpawned") == FeatureStatus_Available;
+
+	g_hCookie_DisableLagComp = RegClientCookie("disable_lagcomp", "", CookieAccess_Private);
+	RegConsoleCmd("sm_lagcomp", OnToggleLagCompSettings);
+	RegConsoleCmd("sm_0ping", OnToggleLagCompSettings);
+	SetCookieMenuItem(MenuHandler_CookieMenu, 0, "LagCompensation");
+
+	CreateTimer(0.1, DisableLagCompTimer, _, TIMER_REPEAT);
 
 	RegAdminCmd("sm_unlag", Command_AddLagCompensation, ADMFLAG_RCON, "sm_unlag <entidx>");
 	RegAdminCmd("sm_lagged", Command_CheckLagCompensated, ADMFLAG_GENERIC, "sm_lagged");
@@ -319,7 +346,6 @@ public void OnMapStart()
 
 	g_iParent = FindDataMapInfo(0, "m_pParent");
 	g_iSpawnFlags = FindDataMapInfo(0, "m_spawnflags");
-	g_iTouchStamp = FindDataMapInfo(0, "touchStamp");
 	g_iCollision = FindDataMapInfo(0, "m_Collision");
 	g_iSolidFlags = FindDataMapInfo(0, "m_usSolidFlags");
 	g_iSolidType = FindDataMapInfo(0, "m_nSolidType");
@@ -336,6 +362,17 @@ public void OnMapStart()
 	/* Late Load */
 	if(bLate)
 	{
+		for (int client = 1; client <= MaxClients; client++)
+		{
+			if(IsClientInGame(client))
+			{
+				OnClientConnected(client);
+				if(AreClientCookiesCached(client))
+					OnClientCookiesCached(client);
+				OnClientPutInServer(client);
+			}
+		}
+
 		int entity = INVALID_ENT_REFERENCE;
 		while((entity = FindEntityByClassname(entity, "*")) != INVALID_ENT_REFERENCE)
 		{
@@ -356,6 +393,42 @@ public void OnMapStart()
 	g_bLateLoad = false;
 }
 
+public void OnMapEnd()
+{
+	Detour_OnRestartRound();
+	g_bCleaningUp = true;
+}
+
+public void OnClientConnected(int client)
+{
+	g_bDisableLagComp[client] = false;
+	g_iDisableLagComp[client] = 0;
+}
+
+public void OnClientCookiesCached(int client)
+{
+	char sBuffer[16];
+	GetClientCookie(client, g_hCookie_DisableLagComp, sBuffer, sizeof(sBuffer));
+	if(sBuffer[0])
+		g_bDisableLagComp[client] = true;
+	else
+		g_bDisableLagComp[client] = false;
+}
+
+public void OnClientPutInServer(int client)
+{
+	if(g_iLerpTime == -1)
+	{
+		g_iLerpTime = FindDataMapInfo(client, "m_fLerpTime");
+	}
+}
+
+public void OnClientDisconnect(int client)
+{
+	g_bDisableLagComp[client] = false;
+	g_iDisableLagComp[client] = 0;
+}
+
 public void OnEntityCreated(int entity, const char[] classname)
 {
 	if(g_bCleaningUp)
@@ -369,6 +442,19 @@ public void OnEntityCreated(int entity, const char[] classname)
 	{
 		DHookEntity(g_hAcceptInput, true, entity);
 	}
+
+	if(!g_bHasOnEntitySpawned)
+	{
+		SDKHook(entity, SDKHook_SpawnPost, OnSDKHookEntitySpawnPost);
+	}
+}
+
+public void OnSDKHookEntitySpawnPost(int entity)
+{
+	char classname[64];
+	GetEntityClassname(entity, classname, sizeof(classname));
+
+	OnEntitySpawned(entity, classname);
 }
 
 public void OnEntitySpawned(int entity, const char[] classname)
@@ -488,7 +574,7 @@ bool CheckEntityForLagComp(int entity, const char[] classname, bool bRecursive=f
 		iParent = iTmp;
 		GetEntityClassname(iParent, sParentClassname, sizeof(sParentClassname));
 
-		if(StrEqual(sParentClassname, "player") ||
+		if((iParent >= 1 && iParent <= MaxClients) ||
 			!strncmp(sParentClassname, "weapon_", 7))
 		{
 			return false;
@@ -580,7 +666,10 @@ public MRESReturn Detour_OnUTIL_Remove(Handle hParams)
 	if(g_bCleaningUp)
 		return MRES_Ignored;
 
-	int entity = DHookGetParam(hParams, 1);
+	if(DHookIsNullParam(hParams, 1))
+		return MRES_Ignored;
+
+	int entity = DHookGetParamObjectPtrVar(hParams, 1, g_iNetworkableOuter, ObjectValueType_CBaseEntityPtr);
 	if(entity < 0 || entity > MAX_EDICTS)
 		return MRES_Ignored;
 
@@ -704,22 +793,6 @@ public void OnRunThinkFunctions(bool simulating)
 			i--; continue;
 		}
 
-		// Save old touchStamp
-		int touchStamp = GetEntData(g_aEntityLagData[i].iEntity, g_iTouchStamp);
-		g_aEntityLagData[i].iTouchStamp = touchStamp;
-		// We have to increase the touchStamp by 1 here to avoid breaking the touchlink.
-		// The touchStamp is incremented by 1 every time an entities physics are simulated.
-		// When two entities touch then a touchlink is created on both entities with the touchStamp of either entity.
-		// Usually the player would touch the trigger first and then the trigger would touch the player later on in the same frame.
-		// The trigger touching the player would fix up the touchStamp (which was increased by 1 by the trigger physics simulate)
-		// But since we're blocking the trigger from ever touching a player outside of here we need to manually increase it by 1 up front
-		// so the correct +1'd touchStamp is stored in the touchlink.
-		// After simulating the players we restore the old touchStamp (-1) and when the entity is simulated it will increase it again by 1
-		// Thus both touchlinks will have the correct touchStamp value.
-		// The touchStamp doesn't increase when the entity is idle, however it also doesn't check untouch so we're fine.
-		touchStamp++;
-		SetEntData(g_aEntityLagData[i].iEntity, g_iTouchStamp, touchStamp);
-
 		if(g_aEntityLagData[i].iDeleted)
 		{
 			if(g_aEntityLagData[i].iDeleted + MAX_RECORDS <= GetGameTickCount())
@@ -749,11 +822,34 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	// this is because we simulate players first
 	// hence no new entity record was inserted on the current tick
 	int iGameTick = GetGameTickCount() - 1;
+	float fTickInterval = GetTickInterval();
 
-	int iDelta = iGameTick - tickcount;
+	float fLerpTime = GetEntDataFloat(client, g_iLerpTime);
+	// -1 lerp ticks was determined by analyzing hits visually at host_timescale 0.01 and debug_touchlinks 1
+	int iLerpTicks = RoundToFloor(0.5 + (fLerpTime / fTickInterval)) - 1;
+
+	int iTargetTick = tickcount - iLerpTicks;
+	int iDelta = iGameTick - iTargetTick;
+
+	float fCorrect = 0.0;
+	fCorrect += GetClientLatency(client, NetFlow_Outgoing);
+	fCorrect += iLerpTicks * fTickInterval;
+
+	float fDeltaTime = fCorrect - iDelta * fTickInterval;
+	if(FloatAbs(fDeltaTime) > 0.2)
+	{
+		// difference between cmd time and latency is too big > 200ms, use time correction based on latency
+		iDelta = RoundToFloor(0.5 + (fCorrect / fTickInterval));
+	}
+
+	// The player is stupid and doesn't want lag compensation.
+	// To get the original behavior back lets assume they actually have 0 latency.
+	// To avoid abusing toggling lagcomp we increase/decrease this var by 1 every 100ms.
+	// This is so we only skip single ticks at a time. Fully ON = 0, Fully OFF = MAX_RECORDS
+	iDelta -= g_iDisableLagComp[client];
+
 	if(iDelta < 0)
 		iDelta = 0;
-
 	if(iDelta > MAX_RECORDS)
 		iDelta = MAX_RECORDS;
 
@@ -769,10 +865,6 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 			SetBit(g_aaFilterClientSolidTouch, client * MAX_EDICTS + iEntity);
 			continue;
 		}
-		else if(g_aEntityLagData[i].iSpawned == iPlayerSimTick)
-		{
-			ClearBit(g_aaFilterClientSolidTouch, client * MAX_EDICTS + iEntity);
-		}
 
 		if(g_aEntityLagData[i].iDeleted)
 		{
@@ -781,6 +873,10 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 				SetBit(g_aaFilterClientSolidTouch, client * MAX_EDICTS + iEntity);
 				continue;
 			}
+		}
+		else
+		{
+			ClearBit(g_aaFilterClientSolidTouch, client * MAX_EDICTS + iEntity);
 		}
 
 		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
@@ -805,9 +901,6 @@ public void OnPostPlayerThinkFunctions()
 {
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
-		// Restore original touchStamp
-		SetEntData(g_aEntityLagData[i].iEntity, g_iTouchStamp, g_aEntityLagData[i].iTouchStamp);
-
 		if(!g_aEntityLagData[i].bRestore)
 			continue;
 
@@ -995,7 +1088,6 @@ bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
 	g_aEntityLagData[i].iNotMoving = MAX_RECORDS;
 	g_aEntityLagData[i].bRestore = false;
 	g_aEntityLagData[i].bLateKill = bLateKill;
-	g_aEntityLagData[i].iTouchStamp = GetEntData(iEntity, g_iTouchStamp);
 
 	if(bLateKill)
 	{
@@ -1087,7 +1179,6 @@ void EntityLagData_Copy(EntityLagData obj, const EntityLagData other)
 	obj.iSpawned = other.iSpawned;
 	obj.iDeleted = other.iDeleted;
 	obj.iNotMoving = other.iNotMoving;
-	obj.iTouchStamp = other.iTouchStamp;
 	obj.bRestore = other.bRestore;
 	obj.bLateKill = other.bLateKill;
 
@@ -1217,11 +1308,100 @@ stock void PrintToBoth(const char[] format, any ...)
 	VFormat(buffer, sizeof(buffer), format, 2);
 	LogMessage(buffer);
 
-	for (int i = 1; i <= MaxClients; i++)
+	for(int client = 1; client <= MaxClients; client++)
 	{
-		if (IsClientInGame(i))
+		if(IsClientInGame(client))
 		{
-			PrintToConsole(i, "%s", buffer);
+			PrintToConsole(client, "%s", buffer);
+		}
+	}
+}
+
+public Action DisableLagCompTimer(Handle timer)
+{
+	for(int client = 1; client <= MaxClients; client++)
+	{
+		if(g_bDisableLagComp[client] && g_iDisableLagComp[client] < MAX_RECORDS)
+		{
+			g_iDisableLagComp[client]++;
+		}
+		else if(!g_bDisableLagComp[client] && g_iDisableLagComp[client] > 0)
+		{
+			g_iDisableLagComp[client]--;
+		}
+	}
+
+	return Plugin_Continue;
+}
+
+public Action OnLagCompSettings(int client, int args)
+{
+	ShowSettingsMenu(client);
+	return Plugin_Handled;
+}
+
+public Action OnToggleLagCompSettings(int client, int args)
+{
+	ToggleLagCompSettings(client);
+	return Plugin_Handled;
+}
+
+public void ToggleLagCompSettings(int client)
+{
+	g_bDisableLagComp[client] = !g_bDisableLagComp[client];
+	SetClientCookie(client, g_hCookie_DisableLagComp, g_bDisableLagComp[client] ? "1" : "");
+
+	PrintToChat(client, "\x04[LagCompensation]\x01 LagCompensation has been %s.", g_bDisableLagComp[client] ? "disabled" : "enabled");
+}
+
+public void ShowSettingsMenu(int client)
+{
+	Menu menu = new Menu(MenuHandler_MainMenu);
+	menu.SetTitle("LagCompensation Settings", client);
+	menu.ExitBackButton = true;
+
+	char sBuffer[128];
+	Format(sBuffer, sizeof(sBuffer), "LagCompensation: %s", g_bDisableLagComp[client] ? "Disabled" : "Enabled");
+	menu.AddItem("0", sBuffer);
+
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public void MenuHandler_CookieMenu(int client, CookieMenuAction action, any info, char[] buffer, int maxlen)
+{
+	switch(action)
+	{
+		case(CookieMenuAction_DisplayOption):
+		{
+			Format(buffer, maxlen, "LagCompensation", client);
+		}
+		case(CookieMenuAction_SelectOption):
+		{
+			ShowSettingsMenu(client);
+		}
+	}
+}
+
+public int MenuHandler_MainMenu(Menu menu, MenuAction action, int client, int selection)
+{
+	switch(action)
+	{
+		case(MenuAction_Select):
+		{
+			switch(selection)
+			{
+				case(0): ToggleLagCompSettings(client);
+			}
+
+			ShowSettingsMenu(client);
+		}
+		case(MenuAction_Cancel):
+		{
+			ShowCookieMenu(client);
+		}
+		case(MenuAction_End):
+		{
+			delete menu;
 		}
 	}
 }
