@@ -5,7 +5,7 @@
 #include <dhooks>
 #include <clientprefs>
 
-#define PLUGIN_VERSION "1.0.1"
+#define PLUGIN_VERSION "1.0.2"
 
 #define SetBit(%1,%2)		((%1)[(%2) >> 5] |= (1 << ((%2) & 31)))
 #define ClearBit(%1,%2)		((%1)[(%2) >> 5] &= ~(1 << ((%2) & 31)))
@@ -100,7 +100,6 @@ enum struct EntityLagData
 	int iNotMoving;
 	bool bRestore;
 	bool bLateKill;
-	LagRecord RestoreData;
 }
 
 LagRecord g_aaLagRecords[MAX_ENTITIES][MAX_RECORDS];
@@ -110,16 +109,21 @@ bool g_bCleaningUp = true;
 
 bool g_bHasOnEntitySpawned = false;
 
+// SDKCall
 Handle g_hCalcAbsolutePosition;
 Handle g_hMarkPartitionHandleDirty;
 
+// DHooks Detour
 Handle g_hUTIL_Remove;
 Handle g_hRestartRound;
 Handle g_hSetTarget;
 Handle g_hSetTargetPost;
 Handle g_hFrameUpdatePostEntityThink;
+
+// DHooks Virtual
 Handle g_hActivate;
 Handle g_hAcceptInput;
+Handle g_hEndGameFrame;
 
 int g_iNetworkableOuter;
 int g_iParent;
@@ -253,6 +257,21 @@ public void OnPluginStart()
 		SetFailState("GameConfGetOffset(hGameData, \"CServerNetworkableProperty::m_pOuter\") failed!");
 	}
 
+
+	int offset = GameConfGetOffset(hGameData, "CGameRules::EndGameFrame");
+	if(offset == -1)
+	{
+		delete hGameData;
+		SetFailState("Failed to find CGameRules::EndGameFrame offset.");
+	}
+
+	// CGameRules::EndGameFrame
+	g_hEndGameFrame = DHookCreate(offset, HookType_GameRules, ReturnType_Void, ThisPointer_Ignore, Hook_EndGameFrame);
+	if(g_hEndGameFrame == INVALID_HANDLE)
+	{
+		delete hGameData;
+		SetFailState("Failed to DHook CGameRules::EndGameFrame.");
+	}
 	delete hGameData;
 
 
@@ -260,23 +279,35 @@ public void OnPluginStart()
 	if(!hGameData)
 		SetFailState("Failed to load sdktools gamedata.");
 
-	int offset = GameConfGetOffset(hGameData, "Activate");
+	offset = GameConfGetOffset(hGameData, "Activate");
 	if(offset == -1)
+	{
+		delete hGameData;
 		SetFailState("Failed to find Activate offset");
+	}
 
 	// CPhysForce::Activate
 	g_hActivate = DHookCreate(offset, HookType_Entity, ReturnType_Void, ThisPointer_CBaseEntity, Hook_CPhysForce_Activate);
 	if(g_hActivate == INVALID_HANDLE)
+	{
+		delete hGameData;
 		SetFailState("Failed to DHookCreate Activate");
+	}
 
 	offset = GameConfGetOffset(hGameData, "AcceptInput");
 	if(offset == -1)
+	{
+		delete hGameData;
 		SetFailState("Failed to find AcceptInput offset.");
+	}
 
 	// CBaseEntity::AcceptInput( const char *szInputName, CBaseEntity *pActivator, CBaseEntity *pCaller, variant_t Value, int outputID )
-	g_hAcceptInput = DHookCreate(offset, HookType_Entity, ReturnType_Bool, ThisPointer_CBaseEntity, OnAcceptInput);
+	g_hAcceptInput = DHookCreate(offset, HookType_Entity, ReturnType_Bool, ThisPointer_CBaseEntity, Hook_AcceptInput);
 	if(g_hAcceptInput == INVALID_HANDLE)
+	{
+		delete hGameData;
 		SetFailState("Failed to DHook AcceptInput.");
+	}
 
 	DHookAddParam(g_hAcceptInput, HookParamType_CharPtr);
 	DHookAddParam(g_hAcceptInput, HookParamType_CBaseEntity);
@@ -286,6 +317,7 @@ public void OnPluginStart()
 
 	delete hGameData;
 
+	// Capability provider from https://github.com/alliedmodders/sourcemod/pull/1078
 	g_bHasOnEntitySpawned = GetFeatureStatus(FeatureType_Capability, "SDKHook_OnEntitySpawned") == FeatureStatus_Available;
 
 	g_hCookie_DisableLagComp = RegClientCookie("disable_lagcomp", "", CookieAccess_Private);
@@ -341,6 +373,8 @@ public void OnPluginEnd()
 public void OnMapStart()
 {
 	bool bLate = g_bLateLoad;
+
+	DHookGamerules(g_hEndGameFrame, true);
 
 	g_bCleaningUp = false;
 
@@ -465,7 +499,7 @@ public void OnEntitySpawned(int entity, const char[] classname)
 	CheckEntityForLagComp(entity, classname);
 }
 
-public MRESReturn OnAcceptInput(int entity, Handle hReturn, Handle hParams)
+public MRESReturn Hook_AcceptInput(int entity, Handle hReturn, Handle hParams)
 {
 	if(!IsValidEntity(entity))
 		return MRES_Ignored;
@@ -783,34 +817,6 @@ public MRESReturn Detour_OnFrameUpdatePostEntityThink()
 public void OnRunThinkFunctions(bool simulating)
 {
 	BlockTriggerTouchPlayers(g_aBlockTriggerTouchPlayers, false);
-
-	for(int i = 0; i < g_iNumEntities; i++)
-	{
-		if(!IsValidEntity(g_aEntityLagData[i].iEntity))
-		{
-			PrintToBoth("!!!!!!!!!!! OnRunThinkFunctions SHIT deleted: %d / %d", i, g_aEntityLagData[i].iEntity);
-			RemoveRecord(i);
-			i--; continue;
-		}
-
-		if(g_aEntityLagData[i].iDeleted)
-		{
-			if(g_aEntityLagData[i].iDeleted + MAX_RECORDS <= GetGameTickCount())
-			{
-				// calls OnEntityDestroyed right away
-				// which calls RemoveRecord
-				// which moves the next element to our current position
-				RemoveEdict(g_aEntityLagData[i].iEntity);
-				i--; continue;
-			}
-			continue;
-		}
-
-		if(g_aEntityLagData[i].iNotMoving >= MAX_RECORDS)
-			continue;
-
-		RecordDataIntoRecord(g_aEntityLagData[i].iEntity, g_aEntityLagData[i].RestoreData);
-	}
 }
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
@@ -826,7 +832,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 
 	float fLerpTime = GetEntDataFloat(client, g_iLerpTime);
 	// -1 lerp ticks was determined by analyzing hits visually at host_timescale 0.01 and debug_touchlinks 1
-	int iLerpTicks = RoundToFloor(0.5 + (fLerpTime / fTickInterval)) - 1;
+	int iLerpTicks = RoundToNearest(fLerpTime / fTickInterval) - 1;
 
 	int iTargetTick = tickcount - iLerpTicks;
 	int iDelta = iGameTick - iTargetTick;
@@ -839,7 +845,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	if(FloatAbs(fDeltaTime) > 0.2)
 	{
 		// difference between cmd time and latency is too big > 200ms, use time correction based on latency
-		iDelta = RoundToFloor(0.5 + (fCorrect / fTickInterval));
+		iDelta = RoundToNearest(fCorrect / fTickInterval);
 	}
 
 	// The player is stupid and doesn't want lag compensation.
@@ -904,19 +910,28 @@ public void OnPostPlayerThinkFunctions()
 		if(!g_aEntityLagData[i].bRestore)
 			continue;
 
-		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, g_aEntityLagData[i].RestoreData);
+		RestoreEntityFromRecord(g_aEntityLagData[i].iEntity, g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex]);
 		g_aEntityLagData[i].bRestore = false;
 	}
 
 	BlockTriggerTouchPlayers(g_aBlockTriggerTouchPlayers, true);
 }
 
-public void OnRunThinkFunctionsPost(bool simulating)
+public MRESReturn Hook_EndGameFrame()
 {
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
 		if(g_aEntityLagData[i].iDeleted)
 		{
+			if(g_aEntityLagData[i].iDeleted + MAX_RECORDS <= GetGameTickCount())
+			{
+				// calls OnEntityDestroyed right away
+				// which calls RemoveRecord
+				// which moves the next element to our current position
+				RemoveEdict(g_aEntityLagData[i].iEntity);
+				i--; continue;
+			}
+
 			if(g_aEntityLagData[i].iRecordsValid)
 			{
 				g_aEntityLagData[i].iRecordIndex++;
@@ -961,6 +976,8 @@ public void OnRunThinkFunctionsPost(bool simulating)
 
 		LagRecord_Copy(g_aaLagRecords[i][g_aEntityLagData[i].iRecordIndex], TmpRecord);
 	}
+
+	return MRES_Ignored;
 }
 
 
@@ -1181,8 +1198,6 @@ void EntityLagData_Copy(EntityLagData obj, const EntityLagData other)
 	obj.iNotMoving = other.iNotMoving;
 	obj.bRestore = other.bRestore;
 	obj.bLateKill = other.bLateKill;
-
-	LagRecord_Copy(obj.RestoreData, other.RestoreData);
 }
 
 void LagRecord_Copy(LagRecord obj, const LagRecord other)
@@ -1348,6 +1363,9 @@ public Action OnToggleLagCompSettings(int client, int args)
 
 public void ToggleLagCompSettings(int client)
 {
+	if(!client)
+		return;
+
 	g_bDisableLagComp[client] = !g_bDisableLagComp[client];
 	SetClientCookie(client, g_hCookie_DisableLagComp, g_bDisableLagComp[client] ? "1" : "");
 

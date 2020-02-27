@@ -110,6 +110,12 @@
 				"linux"			"8"
 				"windows"		"8"
 			}
+
+			"CGameRules::EndGameFrame"
+			{
+				"linux"			"49"
+				"windows"		"48"
+			}
 		}
 	}
 
@@ -231,6 +237,12 @@
 			{
 				"linux"			"8"
 				"windows"		"8"
+			}
+
+			"CGameRules::EndGameFrame"
+			{
+				"linux"			"48"
+				"windows"		"47"
 			}
 		}
 	}
