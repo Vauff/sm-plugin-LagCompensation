@@ -5,7 +5,7 @@
 #include <dhooks>
 #include <clientprefs>
 
-#define PLUGIN_VERSION "1.0.2"
+#define PLUGIN_VERSION "1.0.3"
 
 #define SetBit(%1,%2)		((%1)[(%2) >> 5] |= (1 << ((%2) & 31)))
 #define ClearBit(%1,%2)		((%1)[(%2) >> 5] &= ~(1 << ((%2) & 31)))
@@ -85,6 +85,8 @@ enum struct LagRecord
 	float vecAbsOrigin[3];
 	float angRotation[3];
 	float angAbsRotation[3];
+	float vecMins[3];
+	float vecMaxs[3];
 	float flSimulationTime;
 	float rgflCoordinateFrame[COORDINATE_FRAME_SIZE];
 }
@@ -139,6 +141,8 @@ int g_iVecOrigin;
 int g_iVecAbsOrigin;
 int g_iAngRotation;
 int g_iAngAbsRotation;
+int g_iVecMins;
+int g_iVecMaxs;
 int g_iSimulationTime;
 int g_iCoordinateFrame;
 
@@ -390,6 +394,8 @@ public void OnMapStart()
 	g_iVecAbsOrigin = FindDataMapInfo(0, "m_vecAbsOrigin");
 	g_iAngRotation = FindDataMapInfo(0, "m_angRotation");
 	g_iAngAbsRotation = FindDataMapInfo(0, "m_angAbsRotation");
+	g_iVecMins = FindDataMapInfo(0, "m_vecMins");
+	g_iVecMaxs = FindDataMapInfo(0, "m_vecMaxs");
 	g_iSimulationTime = FindDataMapInfo(0, "m_flSimulationTime");
 	g_iCoordinateFrame = FindDataMapInfo(0, "m_rgflCoordinateFrame");
 
@@ -821,7 +827,7 @@ public void OnRunThinkFunctions(bool simulating)
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
 {
-	if(!IsPlayerAlive(client))
+	if(!IsPlayerAlive(client) || IsFakeClient(client))
 		return Plugin_Continue;
 
 	// -1 because the newest record in the list is one tick old
@@ -994,6 +1000,8 @@ void RecordDataIntoRecord(int iEntity, LagRecord Record)
 	GetEntDataVector(iEntity, g_iVecAbsOrigin, Record.vecAbsOrigin);
 	GetEntDataVector(iEntity, g_iAngRotation, Record.angRotation);
 	GetEntDataVector(iEntity, g_iAngAbsRotation, Record.angAbsRotation);
+	GetEntDataVector(iEntity, g_iVecMins, Record.vecMins);
+	GetEntDataVector(iEntity, g_iVecMaxs, Record.vecMaxs);
 	GetEntDataArray(iEntity, g_iCoordinateFrame, view_as<int>(Record.rgflCoordinateFrame), COORDINATE_FRAME_SIZE);
 	Record.flSimulationTime = GetEntDataFloat(iEntity, g_iSimulationTime);
 }
@@ -1038,11 +1046,6 @@ bool DoesRotationInvalidateSurroundingBox(int iEntity)
 
 void InvalidatePhysicsRecursive(int iEntity)
 {
-	// NetworkProp()->MarkPVSInformationDirty()
-	int fStateFlags = GetEdictFlags(iEntity);
-	fStateFlags |= FL_EDICT_DIRTY_PVS_INFORMATION;
-	SetEdictFlags(iEntity, fStateFlags);
-
 	// CollisionProp()->MarkPartitionHandleDirty();
 	Address CollisionProp = GetEntityAddress(iEntity) + view_as<Address>(g_iCollision);
 	SDKCall(g_hMarkPartitionHandleDirty, CollisionProp);
@@ -1062,6 +1065,8 @@ void RestoreEntityFromRecord(int iEntity, LagRecord Record)
 	SetEntDataVector(iEntity, g_iVecAbsOrigin, Record.vecAbsOrigin);
 	SetEntDataVector(iEntity, g_iAngRotation, Record.angRotation);
 	SetEntDataVector(iEntity, g_iAngAbsRotation, Record.angAbsRotation);
+	SetEntDataVector(iEntity, g_iVecMins, Record.vecMins);
+	SetEntDataVector(iEntity, g_iVecMaxs, Record.vecMaxs);
 	SetEntDataArray(iEntity, g_iCoordinateFrame, view_as<int>(Record.rgflCoordinateFrame), COORDINATE_FRAME_SIZE);
 	SetEntDataFloat(iEntity, g_iSimulationTime, Record.flSimulationTime);
 
@@ -1208,6 +1213,8 @@ void LagRecord_Copy(LagRecord obj, const LagRecord other)
 		obj.vecAbsOrigin[i] = other.vecAbsOrigin[i];
 		obj.angRotation[i] = other.angRotation[i];
 		obj.angAbsRotation[i] = other.angAbsRotation[i];
+		obj.vecMins[i] = other.vecMins[i];
+		obj.vecMaxs[i] = other.vecMaxs[i];
 	}
 
 	obj.flSimulationTime = other.flSimulationTime;
