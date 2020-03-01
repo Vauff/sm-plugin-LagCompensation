@@ -5,7 +5,7 @@
 #include <dhooks>
 #include <clientprefs>
 
-#define PLUGIN_VERSION "1.0.3"
+#define PLUGIN_VERSION "1.0.4"
 
 #define SetBit(%1,%2)		((%1)[(%2) >> 5] |= (1 << ((%2) & 31)))
 #define ClearBit(%1,%2)		((%1)[(%2) >> 5] &= ~(1 << ((%2) & 31)))
@@ -25,6 +25,7 @@ public Plugin myinfo =
 
 bool g_bLateLoad = false;
 bool g_bHasPhysHooks = true;
+bool g_bHasOnEntitySpawned = false;
 
 // Don't change this.
 #define MAX_EDICTS 2048
@@ -109,7 +110,10 @@ EntityLagData g_aEntityLagData[MAX_ENTITIES];
 int g_iNumEntities = 0;
 bool g_bCleaningUp = true;
 
-bool g_bHasOnEntitySpawned = false;
+// Cache
+int g_iGameTick;
+float g_fTickInterval;
+int g_aLerpTicks[MAXPLAYERS + 1];
 
 // SDKCall
 Handle g_hCalcAbsolutePosition;
@@ -135,7 +139,6 @@ int g_iSolidFlags;
 int g_iSolidType;
 int g_iSurroundType;
 int g_iEFlags;
-int g_iLerpTime = -1;
 
 int g_iVecOrigin;
 int g_iVecAbsOrigin;
@@ -153,8 +156,8 @@ int g_aBlockTriggerMoved[MAX_EDICTS / 32];
 int g_aBlacklisted[MAX_EDICTS / 32];
 
 Handle g_hCookie_DisableLagComp;
-bool g_bDisableLagComp[MAXPLAYERS+1];
-int g_iDisableLagComp[MAXPLAYERS+1];
+bool g_bDisableLagComp[MAXPLAYERS + 1];
+int g_iDisableLagComp[MAXPLAYERS + 1];
 
 public void OnPluginStart()
 {
@@ -382,6 +385,8 @@ public void OnMapStart()
 
 	g_bCleaningUp = false;
 
+	g_fTickInterval = GetTickInterval();
+
 	g_iParent = FindDataMapInfo(0, "m_pParent");
 	g_iSpawnFlags = FindDataMapInfo(0, "m_spawnflags");
 	g_iCollision = FindDataMapInfo(0, "m_Collision");
@@ -409,7 +414,7 @@ public void OnMapStart()
 				OnClientConnected(client);
 				if(AreClientCookiesCached(client))
 					OnClientCookiesCached(client);
-				OnClientPutInServer(client);
+				OnClientSettingsChanged(client);
 			}
 		}
 
@@ -455,12 +460,13 @@ public void OnClientCookiesCached(int client)
 		g_bDisableLagComp[client] = false;
 }
 
-public void OnClientPutInServer(int client)
+public void OnClientSettingsChanged(int client)
 {
-	if(g_iLerpTime == -1)
-	{
-		g_iLerpTime = FindDataMapInfo(client, "m_fLerpTime");
-	}
+	if(!IsClientInGame(client))
+		return;
+
+	float fLerpTime = GetEntPropFloat(client, Prop_Data, "m_fLerpTime");
+	g_aLerpTicks[client] = RoundToNearest(fLerpTime / g_fTickInterval);
 }
 
 public void OnClientDisconnect(int client)
@@ -822,6 +828,7 @@ public MRESReturn Detour_OnFrameUpdatePostEntityThink()
 
 public void OnRunThinkFunctions(bool simulating)
 {
+	g_iGameTick = GetGameTickCount();
 	BlockTriggerTouchPlayers(g_aBlockTriggerTouchPlayers, false);
 }
 
@@ -830,29 +837,12 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	if(!IsPlayerAlive(client) || IsFakeClient(client))
 		return Plugin_Continue;
 
+	int iTargetTick = tickcount - g_aLerpTicks[client];
+
 	// -1 because the newest record in the list is one tick old
 	// this is because we simulate players first
 	// hence no new entity record was inserted on the current tick
-	int iGameTick = GetGameTickCount() - 1;
-	float fTickInterval = GetTickInterval();
-
-	float fLerpTime = GetEntDataFloat(client, g_iLerpTime);
-	// -1 lerp ticks was determined by analyzing hits visually at host_timescale 0.01 and debug_touchlinks 1
-	int iLerpTicks = RoundToNearest(fLerpTime / fTickInterval) - 1;
-
-	int iTargetTick = tickcount - iLerpTicks;
-	int iDelta = iGameTick - iTargetTick;
-
-	float fCorrect = 0.0;
-	fCorrect += GetClientLatency(client, NetFlow_Outgoing);
-	fCorrect += iLerpTicks * fTickInterval;
-
-	float fDeltaTime = fCorrect - iDelta * fTickInterval;
-	if(FloatAbs(fDeltaTime) > 0.2)
-	{
-		// difference between cmd time and latency is too big > 200ms, use time correction based on latency
-		iDelta = RoundToNearest(fCorrect / fTickInterval);
-	}
+	int iDelta = g_iGameTick - iTargetTick - 1;
 
 	// The player is stupid and doesn't want lag compensation.
 	// To get the original behavior back lets assume they actually have 0 latency.
@@ -865,7 +855,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	if(iDelta > MAX_RECORDS)
 		iDelta = MAX_RECORDS;
 
-	int iPlayerSimTick = iGameTick - iDelta;
+	int iPlayerSimTick = g_iGameTick - iDelta;
 
 	for(int i = 0; i < g_iNumEntities; i++)
 	{
@@ -929,7 +919,7 @@ public MRESReturn Hook_EndGameFrame()
 	{
 		if(g_aEntityLagData[i].iDeleted)
 		{
-			if(g_aEntityLagData[i].iDeleted + MAX_RECORDS <= GetGameTickCount())
+			if(g_aEntityLagData[i].iDeleted + MAX_RECORDS <= g_iGameTick)
 			{
 				// calls OnEntityDestroyed right away
 				// which calls RemoveRecord
