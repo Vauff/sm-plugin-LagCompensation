@@ -448,6 +448,7 @@ public void OnClientConnected(int client)
 {
 	g_bDisableLagComp[client] = false;
 	g_iDisableLagComp[client] = 0;
+	g_aLerpTicks[client] = 0;
 }
 
 public void OnClientCookiesCached(int client)
@@ -462,7 +463,7 @@ public void OnClientCookiesCached(int client)
 
 public void OnClientSettingsChanged(int client)
 {
-	if(!IsClientInGame(client))
+	if(!IsClientInGame(client) || IsFakeClient(client))
 		return;
 
 	float fLerpTime = GetEntPropFloat(client, Prop_Data, "m_fLerpTime");
