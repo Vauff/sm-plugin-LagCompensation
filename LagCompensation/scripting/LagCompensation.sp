@@ -490,7 +490,7 @@ public void OnEntityCreated(int entity, const char[] classname)
 		DHookEntity(g_hAcceptInput, true, entity);
 	}
 
-	if(!g_bHasOnEntitySpawned)
+	if (!g_bHasOnEntitySpawned && (!strncmp(classname, "func_physbox", 12, false) || StrEqual(classname, "trigger_hurt", false) || StrEqual(classname, "trigger_push", false) || StrEqual(classname, "trigger_teleport", false)))
 	{
 		SDKHook(entity, SDKHook_SpawnPost, OnSDKHookEntitySpawnPost);
 	}
