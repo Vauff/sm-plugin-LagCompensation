@@ -5,8 +5,6 @@
 #include <dhooks>
 #include <clientprefs>
 
-#define PLUGIN_VERSION "1.0.4"
-
 #define SetBit(%1,%2)		((%1)[(%2) >> 5] |= (1 << ((%2) & 31)))
 #define ClearBit(%1,%2)		((%1)[(%2) >> 5] &= ~(1 << ((%2) & 31)))
 #define CheckBit(%1,%2)		!!((%1)[(%2) >> 5] & (1 << ((%2) & 31)))
@@ -19,13 +17,15 @@ public Plugin myinfo =
 	name 			= "LagCompensation",
 	author 			= "BotoX",
 	description 	= "",
-	version 		= PLUGIN_VERSION,
+	version 		= "1.0.5",
 	url 			= ""
 };
 
 bool g_bLateLoad = false;
 bool g_bHasPhysHooks = true;
 bool g_bHasOnEntitySpawned = false;
+bool g_bCheckPing = false;
+int g_iCompenseEntityClass;
 
 // Don't change this.
 #define MAX_EDICTS 2048
@@ -148,6 +148,7 @@ int g_iVecMins;
 int g_iVecMaxs;
 int g_iSimulationTime;
 int g_iCoordinateFrame;
+int g_iMinPing;
 
 int g_aLagCompensated[MAX_EDICTS] = {-1, ...};
 int g_aBlockTriggerTouchPlayers[MAX_EDICTS / 32];
@@ -156,12 +157,23 @@ int g_aBlockTriggerMoved[MAX_EDICTS / 32];
 int g_aBlacklisted[MAX_EDICTS / 32];
 
 Handle g_hCookie_DisableLagComp;
+Handle g_hCookie_LagCompMessages;
 bool g_bDisableLagComp[MAXPLAYERS + 1];
+bool g_bLagCompMessages[MAXPLAYERS + 1];
 int g_iDisableLagComp[MAXPLAYERS + 1];
+ConVar g_cvCompenseEntityClass;
+ConVar g_cvCheckUserPing;
+ConVar g_cvMinimumPing;
 
 public void OnPluginStart()
 {
-	CreateConVar("sm_lagcomp_version", PLUGIN_VERSION, "LagCompensation Version", FCVAR_SPONLY|FCVAR_NOTIFY|FCVAR_DONTRECORD).SetString(PLUGIN_VERSION);
+	LoadTranslations("common.phrases");
+
+	g_cvCompenseEntityClass = CreateConVar("sm_lagcomp_entityclass", "0", "Only lagcompensate: [0 = All | 1 = func_physbox only]", _, true, 0.0, true, 1.0);
+	g_cvCheckUserPing = CreateConVar("sm_lagcomp_checkuserping", "0", "Check user's ping before lagcompensating them [0 = Disabled | 1 = Enabled]", _, true, 0.0, true, 1.0);
+	g_cvMinimumPing = CreateConVar("sm_lagcomp_ping", "180", "Minimum ping threshold to apply lagcomp on a client", _, true, 0.0);
+
+	AutoExecConfig(true);
 
 	Handle hGameData = LoadGameConfigFile("LagCompensation.games");
 	if(!hGameData)
@@ -327,15 +339,22 @@ public void OnPluginStart()
 	// Capability provider from https://github.com/alliedmodders/sourcemod/pull/1078
 	g_bHasOnEntitySpawned = GetFeatureStatus(FeatureType_Capability, "SDKHook_OnEntitySpawned") == FeatureStatus_Available;
 
-	g_hCookie_DisableLagComp = RegClientCookie("disable_lagcomp", "", CookieAccess_Private);
+	HookConVarChange(g_cvCompenseEntityClass, OnConVarChanged);
+	HookConVarChange(g_cvCheckUserPing, OnConVarChanged);
+	HookConVarChange(g_cvMinimumPing, OnConVarChanged);
+
+
+	g_hCookie_DisableLagComp = RegClientCookie("disable_lagcomp", "Client LagComp Status", CookieAccess_Private);
+	g_hCookie_LagCompMessages = RegClientCookie("lagcomp_messages", "Print LagComp messages in chat", CookieAccess_Private);
 	RegConsoleCmd("sm_lagcomp", OnToggleLagCompSettings);
 	RegConsoleCmd("sm_0ping", OnToggleLagCompSettings);
+	RegConsoleCmd("sm_checklag", CheckLagComp);
 	SetCookieMenuItem(MenuHandler_CookieMenu, 0, "LagCompensation");
 
 	CreateTimer(0.1, DisableLagCompTimer, _, TIMER_REPEAT);
 
-	RegAdminCmd("sm_unlag", Command_AddLagCompensation, ADMFLAG_RCON, "sm_unlag <entidx>");
-	RegAdminCmd("sm_lagged", Command_CheckLagCompensated, ADMFLAG_GENERIC, "sm_lagged");
+	RegAdminCmd("sm_unlag", Command_AddLagCompensation, ADMFLAG_ROOT, "sm_unlag <entidx>");
+	RegAdminCmd("sm_lagged", Command_CheckLagCompensated, ADMFLAG_ROOT, "sm_lagged");
 
 	FilterClientSolidTouch(g_aaFilterClientSolidTouch, true);
 	BlockTriggerMoved(g_aBlockTriggerMoved, true);
@@ -343,13 +362,14 @@ public void OnPluginStart()
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
+	RegPluginLibrary("LagCompensation");
 	g_bLateLoad = late;
 	return APLRes_Success;
 }
 
 public void OnLibraryRemoved(const char[] name)
 {
-	if(StrEqual(name, "PhysHooks"))
+	if(strcmp(name, "PhysHooks", false) == 0)
 		g_bHasPhysHooks = false;
 }
 
@@ -375,6 +395,23 @@ public void OnPluginEnd()
 			RemoveEdict(g_aEntityLagData[i].iEntity);
 		}
 	}
+}
+
+public void OnConfigsExecuted()
+{
+	g_iCompenseEntityClass = GetConVarInt(g_cvCompenseEntityClass);
+	g_bCheckPing = GetConVarBool(g_cvCheckUserPing);
+	g_iMinPing = GetConVarInt(g_cvMinimumPing);
+}
+
+void OnConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+	if (convar == g_cvCompenseEntityClass)
+		g_iCompenseEntityClass = GetConVarInt(convar);
+	else if (convar == g_cvCheckUserPing)
+		g_bCheckPing = GetConVarBool(convar);
+	else if (convar == g_cvMinimumPing)
+		g_iMinPing = GetConVarInt(convar);
 }
 
 public void OnMapStart()
@@ -427,7 +464,7 @@ public void OnMapStart()
 				OnEntityCreated(entity, sClassname);
 				OnEntitySpawned(entity, sClassname);
 
-				if(StrEqual(sClassname, "phys_thruster", false))
+				if(strcmp(sClassname, "phys_thruster", false) == 0)
 				{
 					Hook_CPhysForce_Activate(entity);
 				}
@@ -455,10 +492,9 @@ public void OnClientCookiesCached(int client)
 {
 	char sBuffer[16];
 	GetClientCookie(client, g_hCookie_DisableLagComp, sBuffer, sizeof(sBuffer));
-	if(sBuffer[0])
-		g_bDisableLagComp[client] = true;
-	else
-		g_bDisableLagComp[client] = false;
+	g_bDisableLagComp[client] = StringToInt(sBuffer) != 0;
+	GetClientCookie(client, g_hCookie_LagCompMessages, sBuffer, sizeof(sBuffer));
+	g_bLagCompMessages[client] = StringToInt(sBuffer) != 0;
 }
 
 public void OnClientSettingsChanged(int client)
@@ -481,16 +517,17 @@ public void OnEntityCreated(int entity, const char[] classname)
 	if(g_bCleaningUp)
 		return;
 
-	if(StrEqual(classname, "phys_thruster", false))
+	if (strcmp(classname, "phys_thruster", false) == 0)
 	{
 		DHookEntity(g_hActivate, true, entity);
 	}
-	else if(StrEqual(classname, "game_ui", false))
+	else if (strcmp(classname, "game_ui", false) == 0)
 	{
 		DHookEntity(g_hAcceptInput, true, entity);
 	}
 
-	if (!g_bHasOnEntitySpawned && (!strncmp(classname, "func_physbox", 12, false) || StrEqual(classname, "trigger_hurt", false) || StrEqual(classname, "trigger_push", false) || StrEqual(classname, "trigger_teleport", false)))
+	if (!g_bHasOnEntitySpawned && (!strncmp(classname, "func_physbox", 12, false) || (g_iCompenseEntityClass == 0 && strcmp(classname, "trigger_hurt", false) == 0 ||
+		strcmp(classname, "trigger_push", false) == 0 || strcmp(classname, "trigger_teleport", false) == 0)))
 	{
 		SDKHook(entity, SDKHook_SpawnPost, OnSDKHookEntitySpawnPost);
 	}
@@ -520,7 +557,7 @@ public MRESReturn Hook_AcceptInput(int entity, Handle hReturn, Handle hParams)
 	char sCommand[128];
 	DHookGetParamString(hParams, 1, sCommand, sizeof(sCommand));
 
-	if(!StrEqual(sCommand, "Activate", false))
+	if (strcmp(sCommand, "Activate", false) != 0)
 		return MRES_Ignored;
 
 	if(DHookIsNullParam(hParams, 3))
@@ -596,9 +633,10 @@ bool CheckEntityForLagComp(int entity, const char[] classname, bool bRecursive=f
 	if(SpawnFlags & SF_LAGCOMP_DISABLE)
 		return false;
 
-	bool bTrigger = StrEqual(classname, "trigger_hurt", false) ||
-					StrEqual(classname, "trigger_push", false) ||
-					StrEqual(classname, "trigger_teleport", false);
+	bool bTrigger = false;
+
+	if (g_iCompenseEntityClass == 0)
+		bTrigger = strcmp(classname, "trigger_hurt", false) == 0 || strcmp(classname, "trigger_push", false) == 0 || strcmp(classname, "trigger_teleport", false) == 0;
 
 	bool bPhysbox = !strncmp(classname, "func_physbox", 12, false);
 
@@ -641,10 +679,10 @@ bool CheckEntityForLagComp(int entity, const char[] classname, bool bRecursive=f
 		if(strncmp(sParentClassname, "func_", 5))
 			continue;
 
-		if(StrEqual(sParentClassname[5], "movelinear") ||
-			StrEqual(sParentClassname[5], "door") ||
-			StrEqual(sParentClassname[5], "rotating") ||
-			StrEqual(sParentClassname[5], "tracktrain"))
+		if(strcmp(sParentClassname[5], "movelinear", true) == 0 ||
+			strcmp(sParentClassname[5], "door", true) == 0 ||
+			strcmp(sParentClassname[5], "rotating", true) == 0 ||
+			strcmp(sParentClassname[5], "tracktrain", true) == 0)
 		{
 			bGoodParents = true;
 			break;
@@ -824,6 +862,7 @@ public MRESReturn Detour_OnFrameUpdatePostEntityThink()
 		EFlags &= ~EFL_CHECK_UNTOUCH;
 		SetEntData(g_aEntityLagData[i].iEntity, g_iEFlags, EFlags);
 	}
+	return MRES_Ignored;
 }
 
 
@@ -1070,22 +1109,23 @@ bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
 	if(g_bCleaningUp)
 		return false;
 
-	if(g_iNumEntities == MAX_ENTITIES)
-	{
-		char sClassname[64];
-		GetEntityClassname(iEntity, sClassname, sizeof(sClassname));
-
-		char sTargetname[64];
-		GetEntPropString(iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
-
-		int iHammerID = GetEntProp(iEntity, Prop_Data, "m_iHammerID");
-
-		PrintToBoth("[%d] OUT OF LAGCOMP SLOTS entity %d (%s)\"%s\"(#%d)", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID);
-		return false;
-	}
-
 	if(g_aLagCompensated[iEntity] != -1)
 		return false;
+
+	char sClassname[64];
+	GetEntityClassname(iEntity, sClassname, sizeof(sClassname));
+
+	char sTargetname[64];
+	GetEntPropString(iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
+
+	int iHammerID = GetEntProp(iEntity, Prop_Data, "m_iHammerID");
+
+	if(g_iNumEntities >= MAX_ENTITIES)
+	{
+		PrintToBoth("[%d] OUT OF LAGCOMP SLOTS entity %d (%s)\"%s\"(#%d)", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID);
+		LogError("OUT OF LAGCOMP SLOTS entity %d (%s)\"%s\"(#%d)", iEntity, sClassname, sTargetname, iHammerID);
+		return false;
+	}
 
 	int i = g_iNumEntities;
 	g_iNumEntities++;
@@ -1108,18 +1148,7 @@ bool AddEntityForLagCompensation(int iEntity, bool bLateKill)
 	}
 
 	RecordDataIntoRecord(iEntity, g_aaLagRecords[i][0]);
-
-	{
-		char sClassname[64];
-		GetEntityClassname(iEntity, sClassname, sizeof(sClassname));
-
-		char sTargetname[64];
-		GetEntPropString(iEntity, Prop_Data, "m_iName", sTargetname, sizeof(sTargetname));
-
-		int iHammerID = GetEntProp(iEntity, Prop_Data, "m_iHammerID");
-
-		PrintToBoth("[%d] added entity %d (%s)\"%s\"(#%d) under index %d", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID, i);
-	}
+	PrintToBoth("[%d] added entity %d (%s)\"%s\"(#%d) under index %d", GetGameTickCount(), iEntity, sClassname, sTargetname, iHammerID, i);
 
 	return true;
 }
@@ -1323,9 +1352,9 @@ stock void PrintToBoth(const char[] format, any ...)
 
 	for(int client = 1; client <= MaxClients; client++)
 	{
-		if(IsClientInGame(client))
+		if (IsClientInGame(client) && g_bLagCompMessages[client])
 		{
-			PrintToConsole(client, "%s", buffer);
+			PrintToChat(client, "%s", buffer);
 		}
 	}
 }
@@ -1334,6 +1363,21 @@ public Action DisableLagCompTimer(Handle timer)
 {
 	for(int client = 1; client <= MaxClients; client++)
 	{
+		if(!IsClientInGame(client) || !IsPlayerAlive(client) || IsFakeClient(client))
+			continue;
+
+		// https://github.com/ValveSoftware/source-sdk-2013/blob/master/sp/src/game/server/util.cpp#L747
+		if (g_bCheckPing)
+		{
+			int iAvgPing = RoundFloat(GetClientAvgLatency(client, NetFlow_Outgoing) * 1000);
+
+			if (iAvgPing > g_iMinPing)
+			{
+				g_iDisableLagComp[client]++;
+				return Plugin_Continue;
+			}
+		}
+
 		if(g_bDisableLagComp[client] && g_iDisableLagComp[client] < MAX_RECORDS)
 		{
 			g_iDisableLagComp[client]++;
@@ -1370,15 +1414,61 @@ public void ToggleLagCompSettings(int client)
 	PrintToChat(client, "\x04[LagCompensation]\x01 LagCompensation has been %s.", g_bDisableLagComp[client] ? "disabled" : "enabled");
 }
 
+public void ToggleLagCompMessages(int client)
+{
+	if(!client)
+		return;
+
+	g_bLagCompMessages[client] = !g_bLagCompMessages[client];
+	SetClientCookie(client, g_hCookie_LagCompMessages, g_bLagCompMessages[client] ? "1" : "");
+
+	PrintToChat(client, "\x04[LagCompensation]\x01 LagCompensation messages have been %s.", g_bLagCompMessages[client] ? "enabled" : "disabled");
+}
+
+public Action CheckLagComp(int client, int args)
+{
+	if (args > 1)
+	{
+		PrintToChat(client, "\x04[LagCompensation] \x01Usage sm_checklag <client>");
+		return Plugin_Handled;
+	}
+
+	int target = -1;
+	char sEnable[64];
+	FormatEx(sEnable, sizeof(sEnable), "enabled (%s)", g_iCompenseEntityClass == 0 ? "Triggers and func_physbox" : "func_physbox only");
+
+	if (args == 0)
+		target = client;
+	else
+	{
+		char arg1[65];
+		GetCmdArg(1, arg1, sizeof(arg1));
+		target = FindTarget(client, arg1, true, false);
+	}
+
+	if (target == -1)
+	{
+		ReplyToCommand(client, "\x04[LagCompensation] \x01Invalid target.");
+		return Plugin_Handled;
+	}
+
+	PrintToChat(client, "\x04[LagCompensation] \x01LagCompensation is %s for \x05%N", g_bDisableLagComp[target] ? "disabled" : sEnable, target);
+
+	return Plugin_Handled;
+}
+
 public void ShowSettingsMenu(int client)
 {
 	Menu menu = new Menu(MenuHandler_MainMenu);
 	menu.SetTitle("LagCompensation Settings", client);
 	menu.ExitBackButton = true;
 
-	char sBuffer[128];
-	Format(sBuffer, sizeof(sBuffer), "LagCompensation: %s", g_bDisableLagComp[client] ? "Disabled" : "Enabled");
-	menu.AddItem("0", sBuffer);
+	char buffer[128], msg_buffer[128];
+	Format(buffer, sizeof(buffer), "LagCompensation: %s", g_bDisableLagComp[client] ? "Disabled" : "Enabled");
+	Format(msg_buffer, sizeof(msg_buffer), "LagCompensation Messages: %s", g_bLagCompMessages[client] ? "Enabled" : "Disabled");
+
+	menu.AddItem("0", buffer);
+	menu.AddItem("1", msg_buffer);
 
 	menu.Display(client, MENU_TIME_FOREVER);
 }
@@ -1407,6 +1497,7 @@ public int MenuHandler_MainMenu(Menu menu, MenuAction action, int client, int se
 			switch(selection)
 			{
 				case(0): ToggleLagCompSettings(client);
+				case(1): ToggleLagCompMessages(client);
 			}
 
 			ShowSettingsMenu(client);
@@ -1420,4 +1511,5 @@ public int MenuHandler_MainMenu(Menu menu, MenuAction action, int client, int se
 			delete menu;
 		}
 	}
+	return 0;
 }
