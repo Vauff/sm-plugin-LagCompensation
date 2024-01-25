@@ -4,6 +4,7 @@
 #include <PhysHooks>
 #include <dhooks>
 #include <clientprefs>
+#include <multicolors>
 
 #define SetBit(%1,%2)		((%1)[(%2) >> 5] |= (1 << ((%2) & 31)))
 #define ClearBit(%1,%2)		((%1)[(%2) >> 5] &= ~(1 << ((%2) & 31)))
@@ -15,9 +16,9 @@
 public Plugin myinfo =
 {
 	name 			= "LagCompensation",
-	author 			= "BotoX",
+	author 			= "BotoX, Vauff, .Rushaway, maxime1907",
 	description 	= "",
-	version 		= "1.0.5",
+	version 		= "1.0.6",
 	url 			= ""
 };
 
@@ -130,6 +131,8 @@ Handle g_hFrameUpdatePostEntityThink;
 Handle g_hActivate;
 Handle g_hAcceptInput;
 Handle g_hEndGameFrame;
+
+#define PREFIX "{green}[LagCompensation]{default}"
 
 int g_iNetworkableOuter;
 int g_iParent;
@@ -1411,7 +1414,7 @@ public void ToggleLagCompSettings(int client)
 	g_bDisableLagComp[client] = !g_bDisableLagComp[client];
 	SetClientCookie(client, g_hCookie_DisableLagComp, g_bDisableLagComp[client] ? "1" : "");
 
-	PrintToChat(client, "\x04[LagCompensation]\x01 LagCompensation has been %s.", g_bDisableLagComp[client] ? "disabled" : "enabled");
+	CPrintToChat(client, "%s LagCompensation has been %s.", PREFIX, g_bDisableLagComp[client] ? "disabled" : "enabled");
 }
 
 public void ToggleLagCompMessages(int client)
@@ -1422,14 +1425,14 @@ public void ToggleLagCompMessages(int client)
 	g_bLagCompMessages[client] = !g_bLagCompMessages[client];
 	SetClientCookie(client, g_hCookie_LagCompMessages, g_bLagCompMessages[client] ? "1" : "");
 
-	PrintToChat(client, "\x04[LagCompensation]\x01 LagCompensation messages have been %s.", g_bLagCompMessages[client] ? "enabled" : "disabled");
+	CPrintToChat(client, "%s LagCompensation messages have been %s.", PREFIX, g_bLagCompMessages[client] ? "enabled" : "disabled");
 }
 
 public Action CheckLagComp(int client, int args)
 {
 	if (args > 1)
 	{
-		PrintToChat(client, "\x04[LagCompensation] \x01Usage sm_checklag <client>");
+		CPrintToChat(client, "%s Usage sm_checklag <client>", PREFIX);
 		return Plugin_Handled;
 	}
 
@@ -1448,11 +1451,11 @@ public Action CheckLagComp(int client, int args)
 
 	if (target == -1)
 	{
-		ReplyToCommand(client, "\x04[LagCompensation] \x01Invalid target.");
+		CReplyToCommand(client, "%s Invalid target.", PREFIX);
 		return Plugin_Handled;
 	}
 
-	PrintToChat(client, "\x04[LagCompensation] \x01LagCompensation is %s for \x05%N", g_bDisableLagComp[target] ? "disabled" : sEnable, target);
+	CPrintToChat(client, "%s LagCompensation is %s for {olive}%N", PREFIX, g_bDisableLagComp[target] ? "disabled" : sEnable, target);
 
 	return Plugin_Handled;
 }

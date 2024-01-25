@@ -1,4 +1,10 @@
-/include
-/spcomp
-/spcomp64
-/spcomp.exe
+build/
+release/
+
+.DS_Store
+.vscode
+
+*.smx
+plugins/
+.sourceknight
+.venv
